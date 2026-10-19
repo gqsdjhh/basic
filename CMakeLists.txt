@@ -57,33 +57,11 @@ file(GLOB_RECURSE USER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/modules/*.c
 )
 
-# FreeRTOS sources
-set(FREERTOS_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/croutine.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/event_groups.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/list.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/queue.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/stream_buffer.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/tasks.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/timers.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/CMSIS_RTOS/cmsis_os.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F/port.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/FreeRTOS/Source/portable/MemMang/heap_4.c
-)
-
 # SEGGER RTT sources
 set(SEGGER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/SEGGER/RTT/SEGGER_RTT.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/SEGGER/RTT/SEGGER_RTT_printf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/Third_Party/SEGGER/RTT/SEGGER_RTT_ASM_ARMv7M.s
-)
-
-# USB Device Library sources
-set(USB_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_core.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ctlreq.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Core/Src/usbd_ioreq.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
 )
 
 # Link directories setup
@@ -94,9 +72,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${USER_SOURCES}
-    ${FREERTOS_SOURCES}
     ${SEGGER_SOURCES}
-    ${USB_SOURCES}
 )
 
 # Add include paths
@@ -129,6 +105,20 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     libCMSISDSP.a
     m
 )
+
+# Resolve binutils from the directory of the selected toolchain compiler.
+# This avoids relying on starm-objcopy/starm-size being present in PATH.
+if(CMAKE_C_COMPILER)
+    get_filename_component(_TOOLCHAIN_BIN_DIR "${CMAKE_C_COMPILER}" DIRECTORY)
+    find_program(_STARM_OBJCOPY NAMES starm-objcopy HINTS "${_TOOLCHAIN_BIN_DIR}" NO_DEFAULT_PATH)
+    find_program(_STARM_SIZE NAMES starm-size HINTS "${_TOOLCHAIN_BIN_DIR}" NO_DEFAULT_PATH)
+    if(_STARM_OBJCOPY)
+        set(CMAKE_OBJCOPY "${_STARM_OBJCOPY}")
+    endif()
+    if(_STARM_SIZE)
+        set(CMAKE_SIZE "${_STARM_SIZE}")
+    endif()
+endif()
 
 # Generate hex/bin files and show firmware size
 add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
