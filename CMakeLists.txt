@@ -86,48 +86,6 @@ set(USB_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/STM32_USB_Device_Library/Class/CDC/Src/usbd_cdc.c
 )
 
-# Additional CubeMX generated sources
-set(CUBEMX_EXTRA_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/adc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/can.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/dac.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/dma.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/freertos.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/gpio.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/i2c.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/rng.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/rtc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/spi.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/tim.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/usart.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/usb_device.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/usbd_cdc_if.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/usbd_conf.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/usbd_desc.c
-)
-
-# HAL drivers not requested by the current .ioc yet
-set(EXTRA_HAL_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_adc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_adc_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_can.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dac.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_dac_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_i2c_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_pcd_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rng.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_rtc_ex.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_spi.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_hal_uart.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_adc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Drivers/STM32F4xx_HAL_Driver/Src/stm32f4xx_ll_usb.c
-)
-
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Lib
@@ -139,8 +97,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${FREERTOS_SOURCES}
     ${SEGGER_SOURCES}
     ${USB_SOURCES}
-    ${CUBEMX_EXTRA_SOURCES}
-    ${EXTRA_HAL_SOURCES}
 )
 
 # Add include paths
