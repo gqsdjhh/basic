@@ -2,7 +2,7 @@
 #include "memory.h"
 #include "general_def.h"
 #include "user_lib.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 #include "string.h"
 #include "daemon.h"
 #include "stdlib.h"
@@ -10,7 +10,7 @@
 
 static uint8_t idx;
 static HTMotorInstance *ht_motor_instance[HT_MOTOR_CNT];
-static osThreadId ht_task_handle[HT_MOTOR_CNT];
+static osThreadId_t ht_task_handle[HT_MOTOR_CNT];
 static uint8_t zero_buff[6] = {0};
 
 /**
@@ -143,7 +143,7 @@ void HTMotorSetRef(HTMotorInstance *motor, float ref)
  * @brief 为了避免总线堵塞,为每个电机创建一个发送任务
  * @param argument 传入的电机指针
  */
-__attribute__((noreturn)) void HTMotorTask(void const *argument)
+__attribute__((noreturn)) void HTMotorTask(void *argument)
 {
     float set, pid_measure, pid_ref;
     HTMotorInstance *motor = (HTMotorInstance *)argument;
@@ -205,18 +205,22 @@ __attribute__((noreturn)) void HTMotorTask(void const *argument)
 
 void HTMotorControlInit()
 {
-    char ht_task_name[5] = "ht";
-    // 遍历所有电机实例,创建任务
+    static char ht_task_names[HT_MOTOR_CNT][8];
+    // 遍历所有电机实例创建任务
     if (!idx)
         return;
     for (size_t i = 0; i < idx; i++)
     {
         char ht_id_buff[2] = {0};
         __itoa(i, ht_id_buff, 10);
-        strcat(ht_task_name, ht_id_buff); // 似乎没什么吊用,osthreaddef会把第一个变量当作宏字符串传入,作为任务名
-        // @todo 还需要一个更优雅的方案来区分不同的电机任务
-        osThreadDef(ht_task_name, HTMotorTask, osPriorityNormal, 0, 128);
-        ht_task_handle[i] = osThreadCreate(osThread(ht_task_name), ht_motor_instance[i]);
+        strcpy(ht_task_names[i], "ht");
+        strcat(ht_task_names[i], ht_id_buff);
+        const osThreadAttr_t thread_attr = {
+            .name = ht_task_names[i],
+            .stack_size = 128 * 4,
+            .priority = (osPriority_t)osPriorityNormal,
+        };
+        ht_task_handle[i] = osThreadNew(HTMotorTask, ht_motor_instance[i], &thread_attr);
     }
 }
 

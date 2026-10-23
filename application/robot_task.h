@@ -4,7 +4,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "main.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 
 #include "robot.h"
 #include "ins_task.h"
@@ -17,17 +17,47 @@
 
 #include "bsp_log.h"
 
-osThreadId insTaskHandle;
-osThreadId robotTaskHandle;
-osThreadId motorTaskHandle;
-osThreadId daemonTaskHandle;
-osThreadId uiTaskHandle;
+osThreadId_t insTaskHandle;
+osThreadId_t robotTaskHandle;
+osThreadId_t motorTaskHandle;
+osThreadId_t daemonTaskHandle;
+osThreadId_t uiTaskHandle;
 
-void StartINSTASK(void const *argument);
-void StartMOTORTASK(void const *argument);
-void StartDAEMONTASK(void const *argument);
-void StartROBOTTASK(void const *argument);
-void StartUITASK(void const *argument);
+void StartINSTASK(void *argument);
+void StartMOTORTASK(void *argument);
+void StartDAEMONTASK(void *argument);
+void StartROBOTTASK(void *argument);
+void StartUITASK(void *argument);
+
+static const osThreadAttr_t insTask_attributes = {
+    .name = "instask",
+    .stack_size = 1024 * 4,
+    .priority = (osPriority_t)osPriorityAboveNormal,
+};
+
+static const osThreadAttr_t motorTask_attributes = {
+    .name = "motortask",
+    .stack_size = 256 * 4,
+    .priority = (osPriority_t)osPriorityNormal,
+};
+
+static const osThreadAttr_t daemonTask_attributes = {
+    .name = "daemontask",
+    .stack_size = 128 * 4,
+    .priority = (osPriority_t)osPriorityNormal,
+};
+
+static const osThreadAttr_t robotTask_attributes = {
+    .name = "robottask",
+    .stack_size = 1024 * 4,
+    .priority = (osPriority_t)osPriorityNormal,
+};
+
+static const osThreadAttr_t uiTask_attributes = {
+    .name = "uitask",
+    .stack_size = 512 * 4,
+    .priority = (osPriority_t)osPriorityNormal,
+};
 
 /**
  * @brief 初始化机器人任务,所有持续运行的任务都在这里初始化
@@ -35,26 +65,21 @@ void StartUITASK(void const *argument);
  */
 void OSTaskInit()
 {
-    osThreadDef(instask, StartINSTASK, osPriorityAboveNormal, 0, 1024);
-    insTaskHandle = osThreadCreate(osThread(instask), NULL); // 由于是阻塞读取传感器,为姿态解算设置较高优先级,确保以1khz的频率执行
+    insTaskHandle = osThreadNew(StartINSTASK, NULL, &insTask_attributes); // 由于是阻塞读取传感器,为姿态解算设置较高优先级,确保以1khz的频率执行
     // // 后续修改为读取传感器数据准备好的中断处理,
 
-    osThreadDef(motortask, StartMOTORTASK, osPriorityNormal, 0, 256);
-    motorTaskHandle = osThreadCreate(osThread(motortask), NULL);
+    motorTaskHandle = osThreadNew(StartMOTORTASK, NULL, &motorTask_attributes);
 
-    osThreadDef(daemontask, StartDAEMONTASK, osPriorityNormal, 0, 128);
-    daemonTaskHandle = osThreadCreate(osThread(daemontask), NULL);
+    daemonTaskHandle = osThreadNew(StartDAEMONTASK, NULL, &daemonTask_attributes);
 
-    osThreadDef(robottask, StartROBOTTASK, osPriorityNormal, 0, 1024);
-    robotTaskHandle = osThreadCreate(osThread(robottask), NULL);
+    robotTaskHandle = osThreadNew(StartROBOTTASK, NULL, &robotTask_attributes);
 
-    osThreadDef(uitask, StartUITASK, osPriorityNormal, 0, 512);
-    uiTaskHandle = osThreadCreate(osThread(uitask), NULL);
+    uiTaskHandle = osThreadNew(StartUITASK, NULL, &uiTask_attributes);
 
     HTMotorControlInit(); // 没有注册HT电机则不会执行
 }
 
-__attribute__((noreturn)) void StartINSTASK(void const *argument)
+__attribute__((noreturn)) void StartINSTASK(void *argument)
 {
     static float ins_start;
     static float ins_dt;
@@ -73,7 +98,7 @@ __attribute__((noreturn)) void StartINSTASK(void const *argument)
     }
 }
 
-__attribute__((noreturn)) void StartMOTORTASK(void const *argument)
+__attribute__((noreturn)) void StartMOTORTASK(void *argument)
 {
     static float motor_dt;
     static float motor_start;
@@ -89,7 +114,7 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
     }
 }
 
-__attribute__((noreturn)) void StartDAEMONTASK(void const *argument)
+__attribute__((noreturn)) void StartDAEMONTASK(void *argument)
 {
     static float daemon_dt;
     static float daemon_start;
@@ -108,7 +133,7 @@ __attribute__((noreturn)) void StartDAEMONTASK(void const *argument)
     }
 }
 
-__attribute__((noreturn)) void StartROBOTTASK(void const *argument)
+__attribute__((noreturn)) void StartROBOTTASK(void *argument)
 {
     static float robot_dt;
     static float robot_start;
@@ -125,7 +150,7 @@ __attribute__((noreturn)) void StartROBOTTASK(void const *argument)
     }
 }
 
-__attribute__((noreturn)) void StartUITASK(void const *argument)
+__attribute__((noreturn)) void StartUITASK(void *argument)
 {
     LOGINFO("[freeRTOS] UI Task Start");
     MyUIInit();

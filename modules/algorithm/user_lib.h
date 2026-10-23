@@ -15,13 +15,13 @@
 
 #include "stdint.h"
 #include "main.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 #include "stm32f407xx.h"
 #include "arm_math.h"
 
 
 #ifndef user_malloc
-#ifdef _CMSIS_OS_H
+#ifdef CMSIS_OS2_H_
 #define user_malloc pvPortMalloc
 #else
 #define user_malloc malloc

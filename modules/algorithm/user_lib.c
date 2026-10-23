@@ -17,7 +17,7 @@
 #include "math.h"
 #include "main.h"
 
-#ifdef _CMSIS_OS_H
+#ifdef CMSIS_OS2_H_
 #define user_malloc pvPortMalloc
 #else
 #define user_malloc malloc

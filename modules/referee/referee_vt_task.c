@@ -14,7 +14,7 @@
 #include "referee_custom.h"
 #include "string.h"
 #include "message_center.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 
 static referee_vt_info_t *vt_recv_info; // 接收到的裁判系统数据
 

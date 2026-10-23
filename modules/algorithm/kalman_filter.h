@@ -30,7 +30,7 @@
 #include "stdlib.h"
 
 #ifndef user_malloc
-#ifdef _CMSIS_OS_H
+#ifdef CMSIS_OS2_H_
 #define user_malloc pvPortMalloc
 #else
 #define user_malloc malloc

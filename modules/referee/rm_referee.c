@@ -16,7 +16,7 @@
 #include "task.h"
 #include "daemon.h"
 #include "bsp_log.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 
 #define RE_RX_BUFFER_SIZE 255u // 裁判系统接收缓冲区大小
 

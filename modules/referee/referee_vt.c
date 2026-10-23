@@ -5,7 +5,7 @@
 #include "task.h"
 #include "daemon.h"
 #include "bsp_log.h"
-#include "cmsis_os.h"
+#include "cmsis_os2.h"
 #define RE_VT_SUFFER_SIZE 255U //计算的其实60U就够装两个信息了，怕不够先定100
 
 static USARTInstance *referee_vt_usart_instance;
