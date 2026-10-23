@@ -438,6 +438,14 @@ BMI088Instance *BMI088Register(BMI088_Init_Config_s *config)
         config->spi_acc_config.spi_work_mode = SPI_BLOCK_MODE;
         config->spi_gyro_config.spi_work_mode = SPI_BLOCK_MODE;
     // 根据参数选择工作模式
+    if (config->work_mode == BMI088_BLOCK_TRIGGER_MODE)
+    {
+        config->spi_acc_config.callback = BMI088AccSPIFinishCallback;
+        config->spi_gyro_config.callback = BMI088GyroSPIFinishCallback;
+        config->acc_int_config.gpio_model_callback = BMI088AccINTCallback;
+        config->gyro_int_config.gpio_model_callback = BMI088GyroINTCallback;
+    }
+
     bmi088_instance->spi_acc = SPIRegister(&config->spi_acc_config);
     bmi088_instance->spi_gyro = SPIRegister(&config->spi_gyro_config);
     bmi088_instance->heat_pwm = PWMRegister(&config->heat_pwm_config);
@@ -468,8 +476,6 @@ BMI088Instance *BMI088Register(BMI088_Init_Config_s *config)
         bmi088_instance->acc_int = GPIORegister(&config->acc_int_config); // 只有在非阻塞模式下才需要注册中断
         bmi088_instance->gyro_int = GPIORegister(&config->gyro_int_config);
 
-        bmi088_instance->acc_int->gpio_model_callback = BMI088AccINTCallback;
-        bmi088_instance->gyro_int->gpio_model_callback = BMI088GyroINTCallback;
     } // 注册实例
     return bmi088_instance;
 }

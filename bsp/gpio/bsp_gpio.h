@@ -3,6 +3,7 @@
 
 #include "gpio.h"
 #include "stdint.h"
+#include "bsp_tools.h"
 
 #define GPIO_MX_DEVICE_NUM 10
 
@@ -32,6 +33,7 @@ typedef struct tmpgpio
     // 随便取个名字当临时声明
     void (*gpio_model_callback)(struct tmpgpio *); // exti中断回调函数
     void *id;                                      // 区分不同的GPIO实例
+    CallbackTaskHandle_t callback_task;            // exti回调任务
 
 } GPIOInstance;
 

@@ -25,7 +25,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "bsp_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -127,5 +127,21 @@ void StartDefaultTask(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+  (void)xTask;
+  (void)pcTaskName;
+  LOGERROR("[FreeRTOS] stack overflow in task [%s]", pcTaskName);
+  taskDISABLE_INTERRUPTS();
+  for (;;)
+    ;
+}
 
+void vApplicationMallocFailedHook(void)
+{
+  LOGERROR("[FreeRTOS] malloc failed");
+  taskDISABLE_INTERRUPTS();
+  for (;;)
+    ;
+}
 /* USER CODE END Application */

@@ -1,9 +1,18 @@
 #include "bsp_iic.h"
 #include "memory.h"
 #include "stdlib.h"
+#include "bsp_log.h"
 
 static uint8_t idx = 0; // 配合中断以及初始化
 static IICInstance *iic_instance[MX_IIC_SLAVE_CNT] = {NULL};
+
+static void IICDeferredCallback(void *arg)
+{
+    IICInstance *instance = (IICInstance *)arg;
+
+    if (instance->callback != NULL)
+        instance->callback(instance);
+}
 
 IICInstance *IICRegister(IIC_Init_Config_s *conf)
 {
@@ -19,6 +28,14 @@ IICInstance *IICRegister(IIC_Init_Config_s *conf)
     instance->work_mode = conf->work_mode;
     instance->handle = conf->handle;
     instance->id = conf->id;
+
+    if (instance->callback != NULL)
+    {
+        instance->callback_task = CreateCallbackTask("iic_rx", IICDeferredCallback, instance,
+                                                     osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+        if (instance->callback_task.thread_id == NULL)
+            LOGERROR("[bsp_iic] failed to create rx callback task");
+    }
 
     iic_instance[idx++] = instance;
     return instance;
@@ -132,8 +149,13 @@ void HAL_I2C_MasterRxCpltCallback(I2C_HandleTypeDef *hi2c)
     {
         if (iic_instance[i]->handle == hi2c && hi2c->Devaddress == iic_instance[i]->dev_address)
         {
-            if (iic_instance[i]->callback != NULL) // 回调函数不为空
-                iic_instance[i]->callback(iic_instance[i]);
+            if (iic_instance[i]->callback != NULL)
+            {
+                if (iic_instance[i]->callback_task.thread_id != NULL)
+                    CallbackTaskNotify(&iic_instance[i]->callback_task);
+                else
+                    iic_instance[i]->callback(iic_instance[i]);
+            }
             return;
         }
     }

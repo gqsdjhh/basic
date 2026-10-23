@@ -4,6 +4,7 @@
 #include "spi.h"
 #include "stdint.h"
 #include "gpio.h"
+#include "bsp_tools.h"
 
 /* 根据开发板引出的spi引脚以及CubeMX中的初始化配置设定 */
 #define SPI_DEVICE_CNT 2       // C型开发板引出两路spi,分别连接BMI088/作为扩展IO在8pin牛角座引出
@@ -31,6 +32,7 @@ typedef struct spi_ins_temp
     volatile uint8_t *cs_pin_state; // 片选信号状态,用于中断模式下的片选控制
     void (*callback)(struct spi_ins_temp *); // 接收回调函数
     void *id;                                // 模块指针
+    CallbackTaskHandle_t callback_task;      // 接收回调任务
 } SPIInstance;
 
 /* 接收回调函数定义,包含SPI的module按照此格式构建回调函数 */

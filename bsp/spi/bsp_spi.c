@@ -1,6 +1,7 @@
 #include "bsp_spi.h"
 #include "memory.h"
 #include "stdlib.h"
+#include "bsp_log.h"
 
 /* 所有的spi instance保存于此,用于callback时判断中断来源*/
 static SPIInstance *spi_instance[MX_SPI_BUS_SLAVE_CNT] = {NULL};
@@ -21,6 +22,14 @@ static void SPIReleaseCS(SPIInstance *spi_ins)
     *spi_ins->cs_pin_state =
         spi_ins->CS_State =
             HAL_GPIO_ReadPin(spi_ins->GPIOx, spi_ins->cs_pin);
+}
+
+static void SPIDeferredCallback(void *arg)
+{
+    SPIInstance *instance = (SPIInstance *)arg;
+
+    if (instance->callback != NULL)
+        instance->callback(instance);
 }
 
 SPIInstance *SPIRegister(SPI_Init_Config_s *conf)
@@ -50,6 +59,15 @@ SPIInstance *SPIRegister(SPI_Init_Config_s *conf)
         while (1)
             ;
     }
+
+    if (instance->callback != NULL)
+    {
+        instance->callback_task = CreateCallbackTask("spi_rx", SPIDeferredCallback, instance,
+                                                     osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+        if (instance->callback_task.thread_id == NULL)
+            LOGERROR("[bsp_spi] failed to create rx callback task");
+    }
+
     spi_instance[idx++] = instance;
     return instance;
 }
@@ -177,11 +195,16 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
         if (spi_instance[i]->spi_handle == hspi && // 显然同一时间一条总线只能有一个从机在接收数据
             HAL_GPIO_ReadPin(spi_instance[i]->GPIOx, spi_instance[i]->cs_pin) == GPIO_PIN_RESET)
         {
-            // 先拉高片选,结束传输,再判断是否有回调函数,如果有则调用回调函数
+            // 先拉高片选,结束传输,再判断是否有回调函数
             SPIReleaseCS(spi_instance[i]);
             // @todo 后续添加holdon模式,由用户自行决定何时释放片选,允许进行连续传输
-            if (spi_instance[i]->callback != NULL) // 回调函数不为空, 则调用回调函数
-                spi_instance[i]->callback(spi_instance[i]);
+            if (spi_instance[i]->callback != NULL)
+            {
+                if (spi_instance[i]->callback_task.thread_id != NULL)
+                    CallbackTaskNotify(&spi_instance[i]->callback_task);
+                else
+                    spi_instance[i]->callback(spi_instance[i]);
+            }
             return;
         }
     }

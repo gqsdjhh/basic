@@ -59,6 +59,9 @@
 #define configENABLE_FPU                         1
 #define configENABLE_MPU                         0
 
+#define configCHECK_FOR_STACK_OVERFLOW           2
+#define configUSE_MALLOC_FAILED_HOOK             1
+#define configUSE_TASK_NOTIFICATIONS             1
 #define configUSE_PREEMPTION                     1
 #define configSUPPORT_STATIC_ALLOCATION          0
 #define configSUPPORT_DYNAMIC_ALLOCATION         1
@@ -68,7 +71,7 @@
 #define configTICK_RATE_HZ                       ((TickType_t)1000)
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)128)
-#define configTOTAL_HEAP_SIZE                    ((size_t)20000)
+#define configTOTAL_HEAP_SIZE                    ((size_t)65536)
 #define configMAX_TASK_NAME_LEN                  ( 32 )
 #define configUSE_TRACE_FACILITY                 1
 #define configUSE_16_BIT_TICKS                   0

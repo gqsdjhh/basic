@@ -121,13 +121,13 @@ int main(void)
   MX_SPI2_Init();
   MX_CRC_Init();
   MX_DAC_Init();
+  /* Init scheduler */
+  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
   /* USER CODE BEGIN 2 */
   RobotInit();
   LOGINFO("[main] SystemInit() and RobotInit() done");
   /* USER CODE END 2 */
 
-  /* Init scheduler */
-  osKernelInitialize();  /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
 
   /* Start scheduler */

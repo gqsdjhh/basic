@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include "main.h"
+#include "bsp_tools.h"
 
 #define DEVICE_USART_CNT 3     // C板至多分配3个串口
 #define USART_RXBUFF_LIMIT 256 // 如果协议需要更大的buff,请修改这里
@@ -28,6 +29,10 @@ typedef struct
     uint8_t recv_buff_size;                // 模块接收一包数据的大小
     UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
     usart_module_callback module_callback; // 解析收到的数据的回调函数
+
+    CallbackTaskHandle_t rx_task; // 接收数据解析任务
+    volatile uint16_t rx_len;     // 本次接收到的数据长度
+    volatile uint8_t rx_pending;  // 接收数据等待解析标志
 
     /* 发送环形缓冲区相关,IT/DMA模式下USARTSend会先将数据入队,由发送完成中断链式驱动发送 */
     uint8_t tx_buff[USART_TXBUFF_SIZE];    // 发送环形缓冲区(队列)

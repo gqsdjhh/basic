@@ -8,6 +8,8 @@
  * @copyright Copyright (c) 2022
  *
  */
+#include <string.h>
+
 #include "master_process.h"
 #include "seasky_protocol.h"
 #include "daemon.h"
@@ -113,21 +115,116 @@ void VisionSend()
 #ifdef VISION_USE_VCP
 
 #include "bsp_usb.h"
-static uint8_t *vis_recv_buff;
 
-static void DecodeVision(uint16_t recv_len)
+#define VISION_RX_BUFF_SIZE 64U
+#define VISION_RX_PAYLOAD_SIZE (sizeof(float) * 2U)
+
+static uint8_t vision_rx_buffer[VISION_RX_BUFF_SIZE];
+static uint16_t vision_rx_length;
+
+static void VisionResetRxParser(void)
 {
-    uint16_t flag_register;
-    get_protocol_info(vis_recv_buff, &flag_register, (uint8_t *)&recv_data.pitch);
-    // TODO: code to resolve flag_register;
+    vision_rx_length = 0U;
+}
+
+static void VisionParseRxStream(void)
+{
+    while (vision_rx_length > 0U)
+    {
+        if (vision_rx_buffer[0] != PROTOCOL_CMD_ID)
+        {
+            uint16_t sof_index = 1U;
+            while ((sof_index < vision_rx_length) && (vision_rx_buffer[sof_index] != PROTOCOL_CMD_ID))
+                sof_index++;
+
+            memmove(vision_rx_buffer, &vision_rx_buffer[sof_index], vision_rx_length - sof_index);
+            vision_rx_length -= sof_index;
+
+            if (vision_rx_length < 4U)
+                return;
+        }
+
+        if (vision_rx_length < 4U)
+            return;
+
+        if (Get_CRC8_Check(vision_rx_buffer, 3U) != vision_rx_buffer[3])
+        {
+            memmove(vision_rx_buffer, &vision_rx_buffer[1], vision_rx_length - 1U);
+            vision_rx_length--;
+            continue;
+        }
+
+        uint16_t data_length = (uint16_t)vision_rx_buffer[1] | ((uint16_t)vision_rx_buffer[2] << 8);
+        uint32_t frame_length = (uint32_t)OFFSET_BYTE + data_length;
+
+        if ((data_length < 2U) ||
+            ((data_length - 2U) > VISION_RX_PAYLOAD_SIZE) ||
+            (frame_length > VISION_RX_BUFF_SIZE))
+        {
+            memmove(vision_rx_buffer, &vision_rx_buffer[1], vision_rx_length - 1U);
+            vision_rx_length--;
+            continue;
+        }
+
+        if (vision_rx_length < frame_length)
+            return;
+
+        uint16_t flag_register;
+        uint16_t cmd_id = get_protocol_info(vision_rx_buffer, &flag_register, (uint8_t *)&recv_data.pitch);
+        if (cmd_id != 0U)
+        {
+            if (vision_daemon_instance != NULL)
+                DaemonReload(vision_daemon_instance);
+            // TODO: code to resolve flag_register;
+            (void)flag_register;
+        }
+
+        memmove(vision_rx_buffer, &vision_rx_buffer[frame_length], vision_rx_length - frame_length);
+        vision_rx_length -= (uint16_t)frame_length;
+    }
+}
+
+static void DecodeVision(uint16_t available)
+{
+    if (available == 0U)
+    {
+        VisionResetRxParser();
+        return;
+    }
+
+    while (USBAvailable() > 0U)
+    {
+        uint16_t space = (uint16_t)VISION_RX_BUFF_SIZE - vision_rx_length;
+
+        if (space == 0U)
+        {
+            VisionParseRxStream();
+            space = (uint16_t)VISION_RX_BUFF_SIZE - vision_rx_length;
+            if (space == 0U)
+            {
+                VisionResetRxParser();
+                continue;
+            }
+        }
+
+        uint16_t read_length = USBRead(&vision_rx_buffer[vision_rx_length], space);
+        if (read_length == 0U)
+            break;
+
+        vision_rx_length += read_length;
+        VisionParseRxStream();
+    }
 }
 
 /* 视觉通信初始化 */
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
 {
     UNUSED(_handle); // 仅为了消除警告
+
+    VisionResetRxParser();
+
     USB_Init_Config_s conf = {.rx_cbk = DecodeVision};
-    vis_recv_buff = USBInit(conf);
+    USBInit(conf);
 
     // 为master process注册daemon,用于判断视觉通信是否离线
     Daemon_Init_Config_s daemon_conf = {
@@ -142,14 +239,15 @@ Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle)
 
 void VisionSend()
 {
-    static uint16_t flag_register;
-    static uint8_t send_buff[VISION_SEND_SIZE];
-    static uint16_t tx_len;
+    uint8_t send_buff[VISION_SEND_SIZE];
+    uint16_t flag_register;
+    uint16_t tx_len;
+
     // TODO: code to set flag_register
     flag_register = 30 << 8 | 0b00000001;
     // 将数据转化为seasky协议的数据包
     get_protocol_send_data(0x02, flag_register, &send_data.yaw, 3, send_buff, &tx_len);
-    USBTransmit(send_buff, tx_len);
+    (void)USBTransmit(send_buff, tx_len);
 }
 
 #endif // VISION_USE_VCP

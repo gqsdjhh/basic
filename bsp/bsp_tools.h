@@ -1,22 +1,39 @@
 #ifndef BSP_TOOLS_H
 #define BSP_TOOLS_H
 
+#include <stddef.h>
 #include "cmsis_os2.h"
-#include "bsp_log.h"
+
+#define CALLBACK_TASK_DEFAULT_STACK_SIZE 1024U
+
+typedef struct
+{
+    osThreadId_t thread_id;
+    uint32_t signal;
+} CallbackTaskHandle_t;
 
 /**
- * @brief 创建一个新的任务,该任务收到osThreadFlagsSet信号时会被唤醒,否则保持挂起状态
- * 
- * @note 注册完成后,只需要将module提供的回调函数替换成osThreadFlagsSet即可
- *       推荐将处理较为复杂的回调函数注册为任务,如视觉长包解析/多机通信/双板通信/裁判系统通信等
+ * @brief 创建一个事件回调任务,任务收到信号后才执行回调
  *
  * @param name 任务名称,注意以'\0'结尾
- * @param cbk 回调函数指针
- * @param ins 回调函数的参数,bsp为实例指针
- * @param priority 任务优先级,决定了在中断结束后能否保证立刻执行
- * @return uint32_t 信号量,用于唤醒该任务
+ * @param callback 回调函数指针
+ * @param argument 回调函数的参数,通常为BSP实例指针
+ * @param priority 任务优先级
+ * @param stack_size 任务栈大小,单位字节,0表示使用默认值
+ * @return CallbackTaskHandle_t 任务句柄和对应的线程标志
  */
-uint32_t CreateCallbackTask(char *name, void *cbk, void *ins, osPriority_t priority);
+CallbackTaskHandle_t CreateCallbackTask(const char *name, void (*callback)(void *), void *argument,
+                                        osPriority_t priority, uint32_t stack_size);
+
+/**
+ * @brief 从任务或中断中触发回调任务
+ *
+ * @param handle CreateCallbackTask()返回的句柄
+ */
+static inline void CallbackTaskNotify(const CallbackTaskHandle_t *handle)
+{
+    if ((handle != NULL) && (handle->thread_id != NULL) && (handle->signal != 0U))
+        (void)osThreadFlagsSet(handle->thread_id, handle->signal);
+}
 
 #endif // BSP_TOOLS_H
-

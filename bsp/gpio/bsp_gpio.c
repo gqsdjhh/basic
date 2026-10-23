@@ -1,9 +1,18 @@
 #include "bsp_gpio.h"
 #include "memory.h"
 #include "stdlib.h"
+#include "bsp_log.h"
 
 static uint8_t idx;
 static GPIOInstance *gpio_instance[GPIO_MX_DEVICE_NUM] = {NULL};
+
+static void GPIODeferredCallback(void *arg)
+{
+    GPIOInstance *instance = (GPIOInstance *)arg;
+
+    if (instance->gpio_model_callback != NULL)
+        instance->gpio_model_callback(instance);
+}
 
 /**
  * @brief EXTI中断回调函数,根据GPIO_Pin找到对应的GPIOInstance,并调用模块回调函数(如果有)
@@ -21,7 +30,10 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         gpio = gpio_instance[i];
         if (gpio->GPIO_Pin == GPIO_Pin && gpio->gpio_model_callback != NULL)
         {
-            gpio->gpio_model_callback(gpio);
+            if (gpio->callback_task.thread_id != NULL)
+                CallbackTaskNotify(&gpio->callback_task);
+            else
+                gpio->gpio_model_callback(gpio);
             return;
         }
     }
@@ -38,6 +50,15 @@ GPIOInstance *GPIORegister(GPIO_Init_Config_s *GPIO_config)
     ins->exti_mode = GPIO_config->exti_mode;
     ins->id = GPIO_config->id;
     ins->gpio_model_callback = GPIO_config->gpio_model_callback;
+
+    if (ins->gpio_model_callback != NULL)
+    {
+        ins->callback_task = CreateCallbackTask("gpio_exti", GPIODeferredCallback, ins,
+                                                osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+        if (ins->callback_task.thread_id == NULL)
+            LOGERROR("[bsp_gpio] failed to create exti callback task");
+    }
+
     gpio_instance[idx++] = ins;
     return ins;
 }

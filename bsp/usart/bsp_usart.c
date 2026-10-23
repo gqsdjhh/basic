@@ -28,11 +28,26 @@ static USARTInstance *usart_instance[DEVICE_USART_CNT] = {NULL};
  */
 void USARTServiceInit(USARTInstance *_instance)
 {
+    if (_instance->rx_pending)
+        return;
+
     HAL_UARTEx_ReceiveToIdle_DMA(_instance->usart_handle, _instance->recv_buff, _instance->recv_buff_size);
     // 关闭dma half transfer中断防止两次进入HAL_UARTEx_RxEventCallback()
-    // 这是HAL库的一个设计失误,发生DMA传输完成/半完成以及串口IDLE中断都会触发HAL_UARTEx_RxEventCallback()
-    // 我们只希望处理第一种和第三种情况,因此直接关闭DMA半传输中断
+    // 这是HAL库的一个设计失�?发生DMA传输完成/半完成以及串口IDLE中断都会触发HAL_UARTEx_RxEventCallback()
+    // 我们只希望处理第一种和第三种情�?因此直接关闭DMA半传输中�?
     __HAL_DMA_DISABLE_IT(_instance->usart_handle->hdmarx, DMA_IT_HT);
+}
+
+static void USARTDeferredRx(void *arg)
+{
+    USARTInstance *instance = (USARTInstance *)arg;
+
+    if (instance->module_callback != NULL)
+        instance->module_callback();
+
+    memset(instance->recv_buff, 0, instance->rx_len);
+    instance->rx_pending = 0;
+    USARTServiceInit(instance);
 }
 
 USARTInstance *USARTRegister(USART_Init_Config_s *init_config)
@@ -52,6 +67,14 @@ USARTInstance *USARTRegister(USART_Init_Config_s *init_config)
     instance->usart_handle = init_config->usart_handle;
     instance->recv_buff_size = init_config->recv_buff_size;
     instance->module_callback = init_config->module_callback;
+
+    if (instance->module_callback != NULL)
+    {
+        instance->rx_task = CreateCallbackTask("usart_rx", USARTDeferredRx, instance,
+                                               osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+        if (instance->rx_task.thread_id == NULL)
+            LOGERROR("[bsp_usart] failed to create rx callback task");
+    }
 
     usart_instance[idx++] = instance;
     USARTServiceInit(instance);
@@ -214,21 +237,33 @@ uint8_t USARTIsReady(USARTInstance *_instance)
  *        我们只希望处理，因此直接关闭DMA半传输中断第一种和第三种情况
  *
  * @param huart 发生中断的串口
- * @param Size 此次接收到的总数居量,暂时没用
+ * @param Size 此次接收到的总数据量
  */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 {
     for (uint8_t i = 0; i < idx; ++i)
     { // find the instance which is being handled
         if (huart == usart_instance[i]->usart_handle)
-        { // call the callback function if it is not NULL
+        {
             if (usart_instance[i]->module_callback != NULL)
             {
-                usart_instance[i]->module_callback();
-                memset(usart_instance[i]->recv_buff, 0, Size); // 接收结束后清空buffer,对于变长数据是必要的
+                if (usart_instance[i]->rx_task.thread_id != NULL)
+                { // 只记录长度并唤醒解析任务,数据处理不在中断中完成
+                    usart_instance[i]->rx_len = Size;
+                    usart_instance[i]->rx_pending = 1;
+                    CallbackTaskNotify(&usart_instance[i]->rx_task);
+                }
+                else
+                { // 任务创建失败时回退到中断内处理
+                    usart_instance[i]->module_callback();
+                    memset(usart_instance[i]->recv_buff, 0, Size);
+                    USARTServiceInit(usart_instance[i]);
+                }
             }
-            HAL_UARTEx_ReceiveToIdle_DMA(usart_instance[i]->usart_handle, usart_instance[i]->recv_buff, usart_instance[i]->recv_buff_size);
-            __HAL_DMA_DISABLE_IT(usart_instance[i]->usart_handle->hdmarx, DMA_IT_HT);
+            else
+            {
+                USARTServiceInit(usart_instance[i]);
+            }
             return; // break the loop
         }
     }
@@ -255,8 +290,11 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
                 usart_instance[i]->tx_in_flight = 0;
                 USARTTxStart(usart_instance[i]);
             }
-            HAL_UARTEx_ReceiveToIdle_DMA(usart_instance[i]->usart_handle, usart_instance[i]->recv_buff, usart_instance[i]->recv_buff_size);
-            __HAL_DMA_DISABLE_IT(usart_instance[i]->usart_handle->hdmarx, DMA_IT_HT);
+            if (usart_instance[i]->rx_pending == 0)
+            {
+                HAL_UARTEx_ReceiveToIdle_DMA(usart_instance[i]->usart_handle, usart_instance[i]->recv_buff, usart_instance[i]->recv_buff_size);
+                __HAL_DMA_DISABLE_IT(usart_instance[i]->usart_handle->hdmarx, DMA_IT_HT);
+            }
             LOGWARNING("[bsp_usart] USART error callback triggered, instance idx [%d]", i);
             return;
         }

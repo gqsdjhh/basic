@@ -4,6 +4,9 @@
 #include "stdlib.h"
 #include "bsp_dwt.h"
 #include "bsp_log.h"
+#include "bsp_tools.h"
+
+#define CAN_RX_FIFO_SIZE 32U
 
 /* can instance ptrs storage, used for recv callback */
 // 在CAN产生接收中断会遍历数组,选出hcan和rxid与发生中断的实例相同的那个,调用其回调函数
@@ -12,6 +15,93 @@
 static CANInstance *can_instance[CAN_MX_REGISTER_CNT] = {NULL};
 static uint8_t idx; // 全局CAN实例索引,每次有新的模块注册会自增
 static CAN_Send_FIFO_s CAN1_Send_FIFO, CAN2_Send_FIFO; // CAN发送队列，每个hcan对应一个队列
+
+typedef struct
+{
+    CAN_FIFO_Data_s queue[CAN_RX_FIFO_SIZE];
+    volatile uint8_t front_idx;
+    volatile uint8_t back_idx;
+    volatile uint8_t current_size;
+    volatile uint32_t drop_cnt;
+    CallbackTaskHandle_t task;
+} CAN_Rx_FIFO_s;
+
+static CAN_Rx_FIFO_s CAN1_Rx_FIFO, CAN2_Rx_FIFO;
+
+static CAN_Rx_FIFO_s *CANGetRxFIFO(CAN_HandleTypeDef *hcan)
+{
+    return (hcan == &hcan1) ? &CAN1_Rx_FIFO : &CAN2_Rx_FIFO;
+}
+
+static void CANRxFIFOPut(CAN_Rx_FIFO_s *fifo, CANInstance *instance, const uint8_t *data, uint8_t length)
+{
+    uint32_t saved_baspri = __get_BASEPRI();
+    __set_BASEPRI(0x50U);
+
+    if (fifo->current_size >= CAN_RX_FIFO_SIZE)
+    {
+        fifo->front_idx = (fifo->front_idx + 1U) % CAN_RX_FIFO_SIZE;
+        fifo->current_size--;
+        fifo->drop_cnt++;
+    }
+
+    CAN_FIFO_Data_s *slot = &fifo->queue[fifo->back_idx];
+    memcpy(slot->data_buff, data, length);
+    slot->DLC_length = length;
+    slot->can_instance = instance;
+    fifo->back_idx = (fifo->back_idx + 1U) % CAN_RX_FIFO_SIZE;
+    fifo->current_size++;
+
+    __set_BASEPRI(saved_baspri);
+
+    CallbackTaskNotify(&fifo->task);
+}
+
+static uint8_t CANRxFIFOPop(CAN_Rx_FIFO_s *fifo, CAN_FIFO_Data_s *frame)
+{
+    uint32_t saved_baspri = __get_BASEPRI();
+    __set_BASEPRI(0x50U);
+
+    if (fifo->current_size == 0U)
+    {
+        __set_BASEPRI(saved_baspri);
+        return 0;
+    }
+
+    *frame = fifo->queue[fifo->front_idx];
+    fifo->front_idx = (fifo->front_idx + 1U) % CAN_RX_FIFO_SIZE;
+    fifo->current_size--;
+
+    __set_BASEPRI(saved_baspri);
+    return 1;
+}
+
+static void CANRxTask(void *arg)
+{
+    CAN_Rx_FIFO_s *fifo = (CAN_Rx_FIFO_s *)arg;
+    CAN_FIFO_Data_s frame;
+
+    while (CANRxFIFOPop(fifo, &frame))
+    {
+        CANInstance *instance = frame.can_instance;
+        if (instance == NULL)
+            continue;
+
+        instance->rx_len = frame.DLC_length;
+        memcpy(instance->rx_buff, frame.data_buff, frame.DLC_length);
+        if (instance->can_module_callback != NULL)
+            instance->can_module_callback(instance);
+    }
+
+    uint32_t saved_baspri = __get_BASEPRI();
+    __set_BASEPRI(0x50U);
+    uint32_t drop_cnt = fifo->drop_cnt;
+    fifo->drop_cnt = 0U;
+    __set_BASEPRI(saved_baspri);
+
+    if (drop_cnt != 0U)
+        LOGWARNING("[bsp_can] rx fifo overflow, dropped [%u] frames", (unsigned)drop_cnt);
+}
 
 /* ----------------two static function called by CANRegister()-------------------- */
 
@@ -58,6 +148,14 @@ static void CANAddFilter(CANInstance *_instance)
  */
 static void CANServiceInit()
 {
+    CAN1_Rx_FIFO.task = CreateCallbackTask("can1_rx", CANRxTask, &CAN1_Rx_FIFO,
+                                           osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+    CAN2_Rx_FIFO.task = CreateCallbackTask("can2_rx", CANRxTask, &CAN2_Rx_FIFO,
+                                           osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+
+    if (CAN1_Rx_FIFO.task.thread_id == NULL || CAN2_Rx_FIFO.task.thread_id == NULL)
+        LOGERROR("[bsp_can] failed to create rx callback task");
+
     HAL_CAN_Start(&hcan1);
     HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
     HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO1_MSG_PENDING);
@@ -194,11 +292,19 @@ static void CANFIFOxCallback(CAN_HandleTypeDef *_hcan, uint32_t fifox)
         { // 两者相等说明这是要找的实例
             if (_hcan == can_instance[i]->can_handle && rxconf.StdId == can_instance[i]->rx_id)
             {
-                if (can_instance[i]->can_module_callback != NULL) // 回调函数不为空就调用
+                if (can_instance[i]->can_module_callback != NULL)
                 {
-                    can_instance[i]->rx_len = rxconf.DLC;                      // 保存接收到的数据长度
-                    memcpy(can_instance[i]->rx_buff, can_rx_buff, rxconf.DLC); // 消息拷贝到对应实例
-                    can_instance[i]->can_module_callback(can_instance[i]);     // 触发回调进行数据解析和处理
+                    CAN_Rx_FIFO_s *fifo = CANGetRxFIFO(_hcan);
+                    if (fifo->task.thread_id != NULL)
+                    {
+                        CANRxFIFOPut(fifo, can_instance[i], can_rx_buff, rxconf.DLC);
+                    }
+                    else
+                    { // 任务创建失败时回退到中断内处理
+                        can_instance[i]->rx_len = rxconf.DLC;
+                        memcpy(can_instance[i]->rx_buff, can_rx_buff, rxconf.DLC);
+                        can_instance[i]->can_module_callback(can_instance[i]);
+                    }
                 }
                 break;
             }

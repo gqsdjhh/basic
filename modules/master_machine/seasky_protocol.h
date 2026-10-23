@@ -20,6 +20,9 @@ typedef struct
 } protocol_rm_struct;
 
 
+/*获取CRC8校验码*/
+uint8_t Get_CRC8_Check(uint8_t *pchMessage, uint16_t dwLength);
+
 /*更新发送数据帧，并计算发送数据帧长度*/
 void get_protocol_send_data(uint16_t send_id,		 // 信号id
 							uint16_t flags_register, // 16位寄存器

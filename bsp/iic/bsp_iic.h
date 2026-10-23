@@ -3,6 +3,7 @@
 
 #include "i2c.h"
 #include "stdint.h"
+#include "bsp_tools.h"
 
 #define IIC_DEVICE_CNT 2   // C板引出了I2C2和I2C3
 #define MX_IIC_SLAVE_CNT 8 // 最大从机数目,根据需要修改
@@ -44,6 +45,7 @@ typedef struct iic_temp_s
     void (*callback)(struct iic_temp_s *); // 接收完成后的回调函数
 
     void *id; // 用于标识i2c instance
+    CallbackTaskHandle_t callback_task; // 接收回调任务
 } IICInstance;
 
 /* I2C 初始化结构体配置 */

@@ -41,8 +41,7 @@ void RobotInit()
 
     OSTaskInit(); // 创建基础任务
 
-    // 初始化完成,开启中断
-    __enable_irq();
+    // 中断持续关闭,由FreeRTOS启动第一个任务时统一开启,避免调度器启动前触发中断通知
 }
 
 void RobotTask()
