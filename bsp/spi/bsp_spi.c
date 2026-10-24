@@ -1,185 +1,195 @@
 #include "bsp_spi.h"
+#include "bsp_dwt.h"
+#include "bsp_log.h"
 #include "memory.h"
 #include "stdlib.h"
-#include "bsp_log.h"
 
 /* 所有的spi instance保存于此,用于callback时判断中断来源*/
 static SPIInstance *spi_instance[MX_SPI_BUS_SLAVE_CNT] = {NULL};
-static uint8_t idx = 0;                            // 配合中断以及初始化
+static uint8_t idx = 0;                                     // 配合中断以及初始化
 volatile uint8_t SPIDeviceOnGoing[SPI_DEVICE_CNT] = {1, 1}; // 用于判断当前spi是否正在传输,防止多个模块同时使用一个spi总线 (0: 正在传输, 1: 未传输)
 
 /* 等待总线空闲,避免多个实例同时使用同一条SPI总线 */
-static void SPIWaitIdle(SPIInstance *spi_ins)
+static uint8_t SPIWaitIdle(SPIInstance *spi_ins)
 {
-    while (!*spi_ins->cs_pin_state)
-        ;
+  float start = DWT_GetTimeline_ms();
+  while (!*spi_ins->cs_pin_state)
+  {
+    if ((DWT_GetTimeline_ms() - start) > 10.0f)
+    {
+      LOGERROR("[bsp_spi] wait bus idle timeout");
+      return 0;
+    }
+  }
+  return 1;
 }
 
 /* 拉高片选并标记总线空闲 */
 static void SPIReleaseCS(SPIInstance *spi_ins)
 {
-    HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_SET);
-    *spi_ins->cs_pin_state =
-        spi_ins->CS_State =
-            HAL_GPIO_ReadPin(spi_ins->GPIOx, spi_ins->cs_pin);
+  HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_SET);
+  *spi_ins->cs_pin_state =
+      spi_ins->CS_State =
+          HAL_GPIO_ReadPin(spi_ins->GPIOx, spi_ins->cs_pin);
 }
 
 static void SPIDeferredCallback(void *arg)
 {
-    SPIInstance *instance = (SPIInstance *)arg;
+  SPIInstance *instance = (SPIInstance *)arg;
 
-    if (instance->callback != NULL)
-        instance->callback(instance);
+  if (instance->callback != NULL)
+    instance->callback(instance);
 }
 
 SPIInstance *SPIRegister(SPI_Init_Config_s *conf)
 {
-    if (idx >= MX_SPI_BUS_SLAVE_CNT) // 超过最大实例数
-        while (1)
-            ;
-    SPIInstance *instance = (SPIInstance *)malloc(sizeof(SPIInstance));
-    memset(instance, 0, sizeof(SPIInstance));
+  if (idx >= MX_SPI_BUS_SLAVE_CNT) // 超过最大实例数
+    while (1)
+      ;
+  SPIInstance *instance = (SPIInstance *)malloc(sizeof(SPIInstance));
+  memset(instance, 0, sizeof(SPIInstance));
 
-    instance->spi_handle = conf->spi_handle;
-    instance->GPIOx = conf->GPIOx;
-    instance->cs_pin = conf->cs_pin;
-    instance->spi_work_mode = conf->spi_work_mode;
-    instance->callback = conf->callback;
-    instance->id = conf->id;
-    if (instance->spi_handle->Instance == SPI1)
-    {
-        instance->cs_pin_state = &SPIDeviceOnGoing[0];
-    }
-    else if (instance->spi_handle->Instance == SPI2)
-    {
-        instance->cs_pin_state = &SPIDeviceOnGoing[1];
-    }
-    else
-    {
-        while (1)
-            ;
-    }
+  instance->spi_handle = conf->spi_handle;
+  instance->GPIOx = conf->GPIOx;
+  instance->cs_pin = conf->cs_pin;
+  instance->spi_work_mode = conf->spi_work_mode;
+  instance->callback = conf->callback;
+  instance->id = conf->id;
+  if (instance->spi_handle->Instance == SPI1)
+  {
+    instance->cs_pin_state = &SPIDeviceOnGoing[0];
+  }
+  else if (instance->spi_handle->Instance == SPI2)
+  {
+    instance->cs_pin_state = &SPIDeviceOnGoing[1];
+  }
+  else
+  {
+    while (1)
+      ;
+  }
 
-    if (instance->callback != NULL)
-    {
-        instance->callback_task = CreateCallbackTask("spi_rx", SPIDeferredCallback, instance,
-                                                     osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
-        if (instance->callback_task.thread_id == NULL)
-            LOGERROR("[bsp_spi] failed to create rx callback task");
-    }
+  if (instance->callback != NULL)
+  {
+    instance->callback_task = CreateCallbackTask("spi_rx", SPIDeferredCallback, instance,
+                                                 osPriorityAboveNormal, CALLBACK_TASK_DEFAULT_STACK_SIZE);
+    if (instance->callback_task.thread_id == NULL)
+      LOGERROR("[bsp_spi] failed to create rx callback task");
+  }
 
-    spi_instance[idx++] = instance;
-    return instance;
+  spi_instance[idx++] = instance;
+  return instance;
 }
 
 void SPITransmit(SPIInstance *spi_ins, uint8_t *ptr_data, uint8_t len)
 {
-    // 异步传输需要等待上一次传输完成,防止同一条总线上的实例互相干扰
-    if (spi_ins->spi_work_mode != SPI_BLOCK_MODE)
-        SPIWaitIdle(spi_ins);
-    // 拉低片选,开始传输(选中从机)
-    HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_RESET);
-    switch (spi_ins->spi_work_mode)
-    {
+  // 异步传输需要等待上一次传输完成,防止同一条总线上的实例互相干扰
+  if ((spi_ins->spi_work_mode != SPI_BLOCK_MODE) && !SPIWaitIdle(spi_ins))
+    return;
+  // 拉低片选,开始传输(选中从机)
+  HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_RESET);
+  switch (spi_ins->spi_work_mode)
+  {
     case SPI_DMA_MODE:
-        *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
-        if (HAL_SPI_Transmit_DMA(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
-            SPIReleaseCS(spi_ins);
-        break;
-    case SPI_IT_MODE:
-        *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
-        if (HAL_SPI_Transmit_IT(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
-            SPIReleaseCS(spi_ins);
-        break;
-    case SPI_BLOCK_MODE:
-        HAL_SPI_Transmit(spi_ins->spi_handle, ptr_data, len, 1000); // 默认50ms超时
-        // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
+      *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
+      if (HAL_SPI_Transmit_DMA(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
         SPIReleaseCS(spi_ins);
-        break;
+      break;
+    case SPI_IT_MODE:
+      *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
+      if (HAL_SPI_Transmit_IT(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
+        SPIReleaseCS(spi_ins);
+      break;
+    case SPI_BLOCK_MODE:
+      HAL_SPI_Transmit(spi_ins->spi_handle, ptr_data, len, 1000); // 默认50ms超时
+      // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
+      SPIReleaseCS(spi_ins);
+      break;
     default:
-        while (1)
-            ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
-        break;
-    }
+      while (1)
+        ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
+      break;
+  }
 }
 
 void SPIRecv(SPIInstance *spi_ins, uint8_t *ptr_data, uint8_t len)
 {
-    // 用于稍后回调使用
-    spi_ins->rx_size = len;
-    spi_ins->rx_buffer = ptr_data;
-    // 异步传输需要等待上一次传输完成,防止同一条总线上的实例互相干扰
-    if (spi_ins->spi_work_mode != SPI_BLOCK_MODE)
-        SPIWaitIdle(spi_ins);
-    // 拉低片选,开始传输
-    HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_RESET);
-    switch (spi_ins->spi_work_mode)
-    {
+  // 用于稍后回调使用
+  spi_ins->rx_size = len;
+  spi_ins->rx_buffer = ptr_data;
+  // 异步传输需要等待上一次传输完成,防止同一条总线上的实例互相干扰
+  if ((spi_ins->spi_work_mode != SPI_BLOCK_MODE) && !SPIWaitIdle(spi_ins))
+    return;
+  // 拉低片选,开始传输
+  HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_RESET);
+  switch (spi_ins->spi_work_mode)
+  {
     case SPI_DMA_MODE:
-        *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
-        if (HAL_SPI_Receive_DMA(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
-            SPIReleaseCS(spi_ins);
-        break;
-    case SPI_IT_MODE:
-        *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
-        if (HAL_SPI_Receive_IT(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
-            SPIReleaseCS(spi_ins);
-        break;
-    case SPI_BLOCK_MODE:
-        HAL_SPI_Receive(spi_ins->spi_handle, ptr_data, len, 1000);
-        // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
+      *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
+      if (HAL_SPI_Receive_DMA(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
         SPIReleaseCS(spi_ins);
-        break;
+      break;
+    case SPI_IT_MODE:
+      *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
+      if (HAL_SPI_Receive_IT(spi_ins->spi_handle, ptr_data, len) != HAL_OK)
+        SPIReleaseCS(spi_ins);
+      break;
+    case SPI_BLOCK_MODE:
+      HAL_SPI_Receive(spi_ins->spi_handle, ptr_data, len, 1000);
+      // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
+      SPIReleaseCS(spi_ins);
+      break;
     default:
-        while (1)
-            ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
-        break;
-    }
+      while (1)
+        ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
+      break;
+  }
 }
 
 void SPITransRecv(SPIInstance *spi_ins, uint8_t *ptr_data_rx, uint8_t *ptr_data_tx, uint8_t len)
 {
 
-    // 用于稍后回调使用,请保证ptr_data_rx在回调函数被调用之前仍然在作用域内,否则析构之后的行为是未定义的!!!
-    spi_ins->rx_size = len;
-    spi_ins->rx_buffer = ptr_data_rx;
-    // 等待上一次传输完成
-    SPIWaitIdle(spi_ins);
-    // 拉低片选,开始传输
-    HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_RESET);
-    *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
-    switch (spi_ins->spi_work_mode)
-    {
+  // 用于稍后回调使用,请保证ptr_data_rx在回调函数被调用之前仍然在作用域内,否则析构之后的行为是未定义的!!!
+  spi_ins->rx_size = len;
+  spi_ins->rx_buffer = ptr_data_rx;
+  // 等待上一次传输完成
+  if (!SPIWaitIdle(spi_ins))
+    return;
+  // 拉低片选,开始传输
+  HAL_GPIO_WritePin(spi_ins->GPIOx, spi_ins->cs_pin, GPIO_PIN_RESET);
+  *spi_ins->cs_pin_state = spi_ins->CS_State = 0;
+  switch (spi_ins->spi_work_mode)
+  {
     case SPI_DMA_MODE:
-        if (HAL_SPI_TransmitReceive_DMA(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len) != HAL_OK)
-            SPIReleaseCS(spi_ins);
-        break;
-    case SPI_IT_MODE:
-        if (HAL_SPI_TransmitReceive_IT(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len) != HAL_OK)
-            SPIReleaseCS(spi_ins);
-        break;
-    case SPI_BLOCK_MODE:
-        HAL_SPI_TransmitReceive(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len, 1000); // 默认50ms超时
-        // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
+      if (HAL_SPI_TransmitReceive_DMA(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len) != HAL_OK)
         SPIReleaseCS(spi_ins);
-        break;
+      break;
+    case SPI_IT_MODE:
+      if (HAL_SPI_TransmitReceive_IT(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len) != HAL_OK)
+        SPIReleaseCS(spi_ins);
+      break;
+    case SPI_BLOCK_MODE:
+      HAL_SPI_TransmitReceive(spi_ins->spi_handle, ptr_data_tx, ptr_data_rx, len, 1000); // 默认50ms超时
+      // 阻塞模式不会调用回调函数,传输完成后直接拉高片选结束
+      SPIReleaseCS(spi_ins);
+      break;
     default:
-        while (1)
-            ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
-        break;
-    }
+      while (1)
+        ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
+      break;
+  }
 }
 
 void SPISetMode(SPIInstance *spi_ins, SPI_TXRX_MODE_e spi_mode)
 {
-    if (spi_mode != SPI_DMA_MODE && spi_mode != SPI_IT_MODE && spi_mode != SPI_BLOCK_MODE)
-        while (1)
-            ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
+  if (spi_mode != SPI_DMA_MODE && spi_mode != SPI_IT_MODE && spi_mode != SPI_BLOCK_MODE)
+    while (1)
+      ; // error mode! 请查看是否正确设置模式，或出现指针越界导致模式被异常修改的情况
 
-    if (spi_ins->spi_work_mode != spi_mode)
-    {
-        spi_ins->spi_work_mode = spi_mode;
-    }
+  if (spi_ins->spi_work_mode != spi_mode)
+  {
+    spi_ins->spi_work_mode = spi_mode;
+  }
 }
 
 /**
@@ -189,25 +199,25 @@ void SPISetMode(SPIInstance *spi_ins, SPI_TXRX_MODE_e spi_mode)
  */
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    for (size_t i = 0; i < idx; i++)
+  for (size_t i = 0; i < idx; i++)
+  {
+    // 如果是当前spi硬件发出的complete,且cs_pin为低电平(说明正在传输),则尝试调用回调函数
+    if (spi_instance[i]->spi_handle == hspi && // 显然同一时间一条总线只能有一个从机在接收数据
+        HAL_GPIO_ReadPin(spi_instance[i]->GPIOx, spi_instance[i]->cs_pin) == GPIO_PIN_RESET)
     {
-        // 如果是当前spi硬件发出的complete,且cs_pin为低电平(说明正在传输),则尝试调用回调函数
-        if (spi_instance[i]->spi_handle == hspi && // 显然同一时间一条总线只能有一个从机在接收数据
-            HAL_GPIO_ReadPin(spi_instance[i]->GPIOx, spi_instance[i]->cs_pin) == GPIO_PIN_RESET)
-        {
-            // 先拉高片选,结束传输,再判断是否有回调函数
-            SPIReleaseCS(spi_instance[i]);
-            // @todo 后续添加holdon模式,由用户自行决定何时释放片选,允许进行连续传输
-            if (spi_instance[i]->callback != NULL)
-            {
-                if (spi_instance[i]->callback_task.thread_id != NULL)
-                    CallbackTaskNotify(&spi_instance[i]->callback_task);
-                else
-                    spi_instance[i]->callback(spi_instance[i]);
-            }
-            return;
-        }
+      // 先拉高片选,结束传输,再判断是否有回调函数
+      SPIReleaseCS(spi_instance[i]);
+      // @todo 后续添加holdon模式,由用户自行决定何时释放片选,允许进行连续传输
+      if (spi_instance[i]->callback != NULL)
+      {
+        if (spi_instance[i]->callback_task.thread_id != NULL)
+          CallbackTaskNotify(&spi_instance[i]->callback_task);
+        else
+          spi_instance[i]->callback(spi_instance[i]);
+      }
+      return;
     }
+  }
 }
 
 /**
@@ -217,15 +227,15 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
  */
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    for (size_t i = 0; i < idx; i++)
+  for (size_t i = 0; i < idx; i++)
+  {
+    if (spi_instance[i]->spi_handle == hspi &&
+        HAL_GPIO_ReadPin(spi_instance[i]->GPIOx, spi_instance[i]->cs_pin) == GPIO_PIN_RESET)
     {
-        if (spi_instance[i]->spi_handle == hspi &&
-            HAL_GPIO_ReadPin(spi_instance[i]->GPIOx, spi_instance[i]->cs_pin) == GPIO_PIN_RESET)
-        {
-            SPIReleaseCS(spi_instance[i]);
-            return;
-        }
+      SPIReleaseCS(spi_instance[i]);
+      return;
     }
+  }
 }
 
 /**
@@ -235,5 +245,5 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
  */
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
-    HAL_SPI_RxCpltCallback(hspi); // 直接调用接收完成的回调函数
+  HAL_SPI_RxCpltCallback(hspi); // 直接调用接收完成的回调函数
 }
