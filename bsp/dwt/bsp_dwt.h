@@ -14,15 +14,15 @@
 #ifndef _BSP_DWT_H
 #define _BSP_DWT_H
 
+#include "bsp_log.h"
 #include "main.h"
 #include "stdint.h"
-#include "bsp_log.h"
 
 typedef struct
 {
-    uint32_t s;
-    uint16_t ms;
-    uint16_t us;
+  uint32_t s;
+  uint16_t ms;
+  uint16_t us;
 } DWT_Time_t;
 
 /**
@@ -30,14 +30,14 @@ typedef struct
  *        首先需要创建一个float类型的变量,用于存储时间间隔
  *        计算得到的时间间隔同时还会通过RTT打印到日志终端,你也可以将你的dt变量添加到查看
  */
-#define TIME_ELAPSE(dt, code)                    \
-    do                                           \
-    {                                            \
-        float tstart = DWT_GetTimeline_s();      \
-        code;                                    \
-        dt = DWT_GetTimeline_s() - tstart;       \
-        LOGINFO("[DWT] " #dt " = %f s\r\n", dt); \
-    } while (0)
+#define TIME_ELAPSE(dt, code)                \
+  do                                         \
+  {                                          \
+    float tstart = DWT_GetTimeline_s();      \
+    code;                                    \
+    dt = DWT_GetTimeline_s() - tstart;       \
+    LOGINFO("[DWT] " #dt " = %f s\r\n", dt); \
+  } while (0)
 
 /**
  * @brief 初始化DWT,传入参数为CPU频率,单位MHz
