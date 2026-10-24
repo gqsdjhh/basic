@@ -1,15 +1,32 @@
 #ifndef BSP_TOOLS_H
 #define BSP_TOOLS_H
 
-#include <stddef.h>
+#include "FreeRTOS.h"
 #include "cmsis_os2.h"
+#include "main.h"
+#include <stddef.h>
 
 #define CALLBACK_TASK_DEFAULT_STACK_SIZE 1024U
 
+/* 与 FreeRTOS 临界区使用相同的中断屏蔽级别,避免各处硬编码 0x50 */
+#define BSP_CRITICAL_BASEPRI ((uint32_t)configMAX_SYSCALL_INTERRUPT_PRIORITY)
+
+static inline uint32_t BSP_CriticalEnter(void)
+{
+  uint32_t saved_baspri = __get_BASEPRI();
+  __set_BASEPRI(BSP_CRITICAL_BASEPRI);
+  return saved_baspri;
+}
+
+static inline void BSP_CriticalExit(uint32_t saved_baspri)
+{
+  __set_BASEPRI(saved_baspri);
+}
+
 typedef struct
 {
-    osThreadId_t thread_id;
-    uint32_t signal;
+  osThreadId_t thread_id;
+  uint32_t signal;
 } CallbackTaskHandle_t;
 
 /**
@@ -32,8 +49,8 @@ CallbackTaskHandle_t CreateCallbackTask(const char *name, void (*callback)(void 
  */
 static inline void CallbackTaskNotify(const CallbackTaskHandle_t *handle)
 {
-    if ((handle != NULL) && (handle->thread_id != NULL) && (handle->signal != 0U))
-        (void)osThreadFlagsSet(handle->thread_id, handle->signal);
+  if ((handle != NULL) && (handle->thread_id != NULL) && (handle->signal != 0U))
+    (void)osThreadFlagsSet(handle->thread_id, handle->signal);
 }
 
 #endif // BSP_TOOLS_H
