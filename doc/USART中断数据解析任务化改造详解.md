@@ -134,8 +134,9 @@ static inline void CallbackTaskNotify(const CallbackTaskHandle_t *handle)
 #define USART_RX_FIFO_DEPTH 4U
 #define USART_RX_FIFO_MASK (USART_RX_FIFO_DEPTH - 1U)
 
-#if ((USART_RX_FIFO_DEPTH & (USART_RX_FIFO_DEPTH - 1U)) != 0U)
-#error "USART_RX_FIFO_DEPTH must be a power of two"
+#if (USART_RX_FIFO_DEPTH < 2U) || \
+    ((USART_RX_FIFO_DEPTH & (USART_RX_FIFO_DEPTH - 1U)) != 0U)
+#error "USART_RX_FIFO_DEPTH must be a power of two and at least 2"
 #endif
 ```
 
@@ -144,7 +145,7 @@ static inline void CallbackTaskNotify(const CallbackTaskHandle_t *handle)
 | 参数 | 含义 |
 |---|---|
 | `USART_RXBUFF_LIMIT` | 单帧最大长度，也是环形缓冲区槽位的最大长度 |
-| `USART_RX_FIFO_DEPTH` | 每个 USART 实例的环形槽位数，必须是 2 的幂 |
+| `USART_RX_FIFO_DEPTH` | 每个 USART 实例的环形槽位数，必须是 2 的幂且至少为 2 |
 | `USART_RX_FIFO_MASK` | 用于快速计算环形索引 |
 
 当前槽位数为 4，环形队列保留一个空槽区分满/空，因此可用容量为 **3 帧**。
@@ -171,7 +172,7 @@ typedef struct
 {
     uint8_t recv_buff[USART_RXBUFF_LIMIT];     // 任务解析用buffer
     uint8_t dma_recv_buff[USART_RXBUFF_LIMIT]; // DMA直接写入的buffer
-    uint8_t recv_buff_size;                    // 一帧最大长度
+    uint16_t recv_buff_size;                   // 一帧最大长度
     UART_HandleTypeDef *usart_handle;
     usart_module_callback module_callback;
 
@@ -182,8 +183,9 @@ typedef struct
     volatile uint16_t rx_fifo_head;
     volatile uint16_t rx_fifo_tail;
     volatile uint32_t rx_fifo_overflow;
+    volatile uint8_t rx_restart_pending; // ISR重启失败,等待任务补启动
 
-    /* 发送环形缓冲区相关成员保持不变 */
+    /* 发送环形缓冲区相关成员保持不变,另增加tx_drop_count丢帧计数 */
     ...
 } USARTInstance;
 ```
@@ -198,17 +200,34 @@ typedef struct
 | `rx_fifo_head` | ISR 写入位置 |
 | `rx_fifo_tail` | 任务读取位置 |
 | `rx_fifo_overflow` | 队列满或帧过大时的丢帧计数 |
+| `rx_restart_pending` | ISR 重启 DMA 失败时置位，由回调任务补启动 |
 | `rx_len` | 当前正在处理的帧长度 |
 
-原来的 `rx_pending` 已移除。DMA 不再等待任务解析，因此不需要 pending 标志来阻止重复启动。
+原来的 `rx_pending` 已移除。DMA 不再等待任务解析，因此不需要 pending 标志来阻止重复启动；`rx_restart_pending` 仅用于 ISR 重启失败后的恢复。
 
 ## 5. 初始化流程
 
 `USARTRegister()` 主要流程：
 
 ```c
+if ((init_config == NULL) || (init_config->usart_handle == NULL))
+    return NULL;
+
+uint16_t recv_buff_size = init_config->recv_buff_size;
+if ((recv_buff_size == 0U) || (recv_buff_size > USART_RXBUFF_LIMIT))
+{
+    LOGERROR("[bsp_usart] invalid recv_buff_size [%u], clamped to [%u]",
+             (unsigned)recv_buff_size, (unsigned)USART_RXBUFF_LIMIT);
+    recv_buff_size = USART_RXBUFF_LIMIT;
+}
+
+USARTInstance *instance = (USARTInstance *)malloc(sizeof(USARTInstance));
+if (instance == NULL)
+    return NULL;
+memset(instance, 0, sizeof(USARTInstance));
+
 instance->usart_handle = init_config->usart_handle;
-instance->recv_buff_size = init_config->recv_buff_size;
+instance->recv_buff_size = recv_buff_size;
 instance->module_callback = init_config->module_callback;
 
 if (instance->module_callback != NULL)
@@ -228,11 +247,12 @@ USARTServiceInit(instance);
 
 注册时：
 
-1. 分配 `USARTInstance` 并清零；
-2. 保存串口句柄、最大帧长度和模块回调；
-3. 如果模块注册了回调，创建 `usart_rx` 任务；
-4. 将实例加入全局实例数组；
-5. 启动第一次 DMA 接收。
+1. 校验句柄和接收长度，长度超出 `USART_RXBUFF_LIMIT` 时钳制到上限；
+2. 分配 `USARTInstance` 并清零，分配失败返回 `NULL`；
+3. 保存串口句柄、最大帧长度和模块回调；
+4. 如果模块注册了回调，创建 `usart_rx` 任务；
+5. 将实例加入全局实例数组；
+6. 启动第一次 DMA 接收。
 
 ## 6. DMA 接收启动与重启
 
@@ -241,12 +261,15 @@ USARTServiceInit(instance);
 ```c
 static HAL_StatusTypeDef USARTStartReceive(USARTInstance *instance)
 {
+    if ((instance == NULL) || (instance->usart_handle == NULL))
+        return HAL_ERROR;
+
     HAL_StatusTypeDef status =
         HAL_UARTEx_ReceiveToIdle_DMA(instance->usart_handle,
                                      instance->dma_recv_buff,
                                      instance->recv_buff_size);
 
-    if (status == HAL_OK)
+    if ((status == HAL_OK) && (instance->usart_handle->hdmarx != NULL))
         __HAL_DMA_DISABLE_IT(instance->usart_handle->hdmarx, DMA_IT_HT);
 
     return status;
@@ -258,9 +281,33 @@ static HAL_StatusTypeDef USARTStartReceive(USARTInstance *instance)
 ```c
 void USARTServiceInit(USARTInstance *_instance)
 {
+    if ((_instance == NULL) || (_instance->usart_handle == NULL))
+        return;
+
     HAL_StatusTypeDef status = USARTStartReceive(_instance);
-    if ((status != HAL_OK) && (status != HAL_BUSY))
+    if (status == HAL_BUSY)
+    {
+        UART_HandleTypeDef *huart = _instance->usart_handle;
+        HAL_DMA_StateTypeDef dma_state =
+            (huart->hdmarx != NULL) ? huart->hdmarx->State : HAL_DMA_STATE_RESET;
+
+        // HAL_BUSY 且状态不一致时先中止,再重新启动
+        if ((huart->RxState != HAL_UART_STATE_BUSY_RX) ||
+            (dma_state != HAL_DMA_STATE_BUSY))
+        {
+            (void)HAL_UART_AbortReceive(huart);
+            status = USARTStartReceive(_instance);
+        }
+        else
+        {
+            return; // 接收仍在进行中
+        }
+    }
+
+    if (status != HAL_OK)
         LOGERROR("[bsp_usart] failed to start receive, status [%d]", status);
+    else
+        _instance->rx_restart_pending = 0U;
 }
 ```
 
@@ -269,7 +316,8 @@ void USARTServiceInit(USARTInstance *_instance)
 - `HAL_UARTEx_ReceiveToIdle_DMA()` 每次只负责一次接收事务；
 - 收到 IDLE 或接收长度达到 `recv_buff_size` 后，HAL 会结束本次接收并调用回调；
 - 因此每处理完一帧都必须再次启动，否则后续数据不会再进入 DMA；
-- 返回 `HAL_BUSY` 表示接收已经处于活动状态，不属于错误；
+- 返回 `HAL_BUSY` 且 UART/DMA 状态一致时表示接收已经处于活动状态，不属于错误；
+- 若 `HAL_BUSY` 但状态不一致，会先 `HAL_UART_AbortReceive()` 再重启，处理 HAL 偶发死锁；
 - DMA 半传输中断被关闭，避免同一帧触发两次 `HAL_UARTEx_RxEventCallback()`。
 
 ## 7. 环形缓冲区入队
@@ -279,7 +327,8 @@ static uint8_t USART_RxFifoPush(USARTInstance *instance,
                                 const uint8_t *data,
                                 uint16_t length)
 {
-    if (length > USART_RXBUFF_LIMIT)
+    if ((length == 0U) || (length > USART_RXBUFF_LIMIT) ||
+        (length > instance->recv_buff_size))
     {
         instance->rx_fifo_overflow++;
         return 0;
@@ -307,6 +356,7 @@ static uint8_t USART_RxFifoPush(USARTInstance *instance,
 - 单生产者：USART ISR；
 - 单消费者：`usart_rx` 任务；
 - 队列满时丢弃 **最新帧**，保持已入队帧的顺序；
+- 长度超过实例配置的 `recv_buff_size` 或为 0 时同样丢弃；
 - `rx_fifo_overflow++` 记录丢帧；
 - 写入数据后使用 `__DMB()`，再发布 `head`；
 - 槽位数为 4，保留一个空槽，因此最多缓存 3 帧。
@@ -323,8 +373,14 @@ static uint8_t USART_RxFifoPop(USARTInstance *instance, uint16_t *length)
 
     USART_RxFrame_t *frame = &instance->rx_fifo[instance->rx_fifo_tail];
     uint16_t frame_length = frame->length;
-    if (frame_length > instance->recv_buff_size)
-        frame_length = instance->recv_buff_size;
+
+    if ((frame_length == 0U) || (frame_length > instance->recv_buff_size))
+    {
+        instance->rx_fifo_overflow++;
+        __DMB();
+        instance->rx_fifo_tail = (instance->rx_fifo_tail + 1U) & USART_RX_FIFO_MASK;
+        return 1;
+    }
 
     memset(instance->recv_buff, 0, instance->recv_buff_size);
     memcpy(instance->recv_buff, frame->data, frame_length);
@@ -339,7 +395,7 @@ static uint8_t USART_RxFifoPop(USARTInstance *instance, uint16_t *length)
 出队时：
 
 1. 检查队列非空；
-2. 读取帧长度；
+2. 读取帧长度，长度非法时丢弃该槽并计入 `rx_fifo_overflow`；
 3. 清空整个 `recv_buff`，避免短帧尾部残留旧数据；
 4. 把帧拷贝到 `recv_buff`；
 5. 更新 `tail`，释放槽位。
@@ -353,27 +409,50 @@ static void USARTDeferredRx(void *arg)
 {
     USARTInstance *instance = (USARTInstance *)arg;
     uint16_t frame_length;
+    uint8_t processed = 0U;
 
-    while (USART_RxFifoPop(instance, &frame_length))
+    if (instance == NULL)
+        return;
+
+    // ISR中重启失败时,在任务中补一次恢复;屏蔽UART中断避免与ISR重复启动DMA
+    if (instance->rx_restart_pending != 0U)
+    {
+        uint32_t saved_baspri = BSP_CriticalEnter();
+        instance->rx_restart_pending = 0U;
+        HAL_StatusTypeDef status = HAL_BUSY;
+
+        if (instance->usart_handle->RxState == HAL_UART_STATE_READY)
+            status = USARTStartReceive(instance);
+        BSP_CriticalExit(saved_baspri);
+
+        if (status != HAL_OK)
+        {
+            if (status != HAL_BUSY)
+                LOGERROR("[bsp_usart] failed to restart receive, status [%d]", status);
+            USARTServiceInit(instance); // 可能处于HAL死锁状态,尝试中止后重启
+        }
+    }
+
+    // 限制单次处理帧数,避免持续高速串口饿死低优先级任务
+    while ((processed < USART_RX_FIFO_DEPTH) &&
+           USART_RxFifoPop(instance, &frame_length))
     {
         instance->rx_len = frame_length;
         if (instance->module_callback != NULL)
             instance->module_callback();
+        processed++;
     }
 
-    // ISR中重启失败时,在任务中补一次恢复
-    if (instance->usart_handle->RxState == HAL_UART_STATE_READY)
+    if (instance->rx_fifo_head != instance->rx_fifo_tail)
     {
-        HAL_StatusTypeDef status = USARTStartReceive(instance);
-        if ((status != HAL_OK) && (status != HAL_BUSY))
-            LOGERROR("[bsp_usart] failed to restart receive, status [%d]", status);
+        CallbackTaskNotify(&instance->rx_task);
+        osDelay(1U); // 让出CPU,剩余帧在下次唤醒后继续处理
     }
 
-    uint32_t saved_baspri = __get_BASEPRI();
-    __set_BASEPRI(0x50U);
+    uint32_t saved_baspri = BSP_CriticalEnter();
     uint32_t overflow = instance->rx_fifo_overflow;
     instance->rx_fifo_overflow = 0U;
-    __set_BASEPRI(saved_baspri);
+    BSP_CriticalExit(saved_baspri);
 
     if (overflow != 0U)
         LOGWARNING("[bsp_usart] rx fifo overflow, dropped [%u] frames", (unsigned)overflow);
@@ -382,10 +461,11 @@ static void USARTDeferredRx(void *arg)
 
 任务行为：
 
-- 被唤醒后一次处理队列中所有帧；
+- 被唤醒后先处理 ISR 留下的 `rx_restart_pending`，在临界区内补启动 DMA；
+- 单次最多处理 `USART_RX_FIFO_DEPTH` 帧，避免高速串口持续占用 CPU；
+- 如果队列仍有剩余帧，会重新通知自己并 `osDelay(1)` 让出 CPU；
 - 每帧设置 `rx_len` 后调用模块回调；
 - 正常情况下不在任务中重新启动 DMA，DMA 已由 ISR 立即重启；
-- 如果检测到 `RxState == HAL_UART_STATE_READY`，会补一次启动，作为 ISR 重启失败的后备；
 - 队列溢出时在任务中打印警告。
 
 ## 10. 中断回调
@@ -408,8 +488,8 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
                                                instance->dma_recv_buff,
                                                Size);
 
-                    (void)USARTStartReceive(instance);
-                    if (Size > 0U)
+                    USARTTryStartReceive(instance); // 先重启接收,再唤醒任务
+                    if ((Size > 0U) || (instance->rx_restart_pending != 0U))
                         CallbackTaskNotify(&instance->rx_task);
                 }
                 else
@@ -425,12 +505,12 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
                            copy_len);
                     instance->rx_len = copy_len;
                     instance->module_callback();
-                    (void)USARTStartReceive(instance);
+                    USARTTryStartReceive(instance);
                 }
             }
             else
             {
-                (void)USARTStartReceive(instance);
+                USARTTryStartReceive(instance);
             }
             return;
         }
@@ -456,20 +536,27 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 | 有模块回调但任务创建失败 | 回退到中断内直接解析 |
 | 没有模块回调 | 只重启 DMA |
 
+`USARTTryStartReceive()` 在中断内重启接收；失败时置位 `rx_restart_pending`，由回调任务补启动。若 `Size == 0` 但重启失败，也会通知任务进行恢复。
+
 ## 11. 错误和离线恢复
 
 `HAL_UART_ErrorCallback()` 中：
 
 ```c
 if (usart_instance[i]->usart_handle->RxState == HAL_UART_STATE_READY)
-    (void)USARTStartReceive(usart_instance[i]);
+{
+    USARTTryStartReceive(usart_instance[i]);
+    if (usart_instance[i]->rx_restart_pending != 0U)
+        CallbackTaskNotify(&usart_instance[i]->rx_task);
+}
 ```
 
 含义：
 
 - 如果 UART 接收状态已经回到 READY，重新启动 DMA；
 - 如果 RX 仍在进行中，不重复启动；
-- `USARTStartReceive()` 返回 `HAL_BUSY` 时忽略，表示已经处于接收状态。
+- `USARTTryStartReceive()` 失败时置位 `rx_restart_pending` 并通知任务补启动；
+- 任务侧会调用 `USARTServiceInit()`，在 HAL 状态不一致时先中止再重启。
 
 模块 daemon 离线恢复仍然调用：
 
@@ -477,7 +564,7 @@ if (usart_instance[i]->usart_handle->RxState == HAL_UART_STATE_READY)
 USARTServiceInit(instance);
 ```
 
-由 `USARTStartReceive()` 重新启动接收。
+`USARTServiceInit()` 在 `HAL_BUSY` 且 UART/DMA 状态一致时直接返回；状态不一致时先 `HAL_UART_AbortReceive()` 再重启。
 
 ## 12. 遥控器应用示例
 
@@ -602,8 +689,8 @@ USART 回调任务高于应用任务，因此：
 最近一次全量构建：
 
 ```text
-RAM:   91144 B / 128 KB (69.54%)
-FLASH: 107080 B / 512 KB (20.42%)
+RAM:   91120 B / 128 KB (69.52%)
+FLASH: 108712 B / 512 KB (20.74%)
 ```
 
 ### 16.2 USART 实例运行时内存
@@ -643,13 +730,19 @@ ISR 新增工作：
 3. **一帧被拆成多次 IDLE 事件时**  
    会作为多个槽进入队列，模块可能收到半帧。需要协议层自己处理或增大 IDLE 判定。
 
-4. **队列满时丢弃最新帧**  
+4. **接收队列满时丢弃最新帧**  
    不会破坏已缓存帧，但会丢帧并打印警告。槽位数为 4，可用容量为 3 帧，可通过增大 `USART_RX_FIFO_DEPTH` 缓解。
 
-5. **每帧两次拷贝**  
+5. **发送队列满时丢弃当前帧**  
+   `USARTTxEnqueue()` 不再按字节丢弃最旧数据，避免截断已排队帧；当前帧被丢弃并增加 `tx_drop_count`。
+
+6. **每帧两次拷贝**  
    `dma_recv_buff → rx_fifo → recv_buff`。当前帧长度很小，开销可接受。
 
-6. **队列槽位固定为 4**  
+7. **回调任务有单次处理上限**  
+   单次最多处理 `USART_RX_FIFO_DEPTH` 帧，剩余帧通过再次通知任务处理，避免高速串口持续占用 CPU。
+
+8. **队列槽位固定为 4**  
    如需更高突发承载能力，可改为 8 或按实例配置，但会增加 RAM。
 
 ## 18. 验证建议
@@ -699,7 +792,8 @@ RobotCMDTask()
 - DMA 不再等待任务解析，连续帧可以缓存在环形队列中；
 - 模块回调接口保持不变，应用层业务代码不需要修改；
 - 代价是每个 USART 实例增加约 1.3KB 运行时内存；
-- 队列满时丢弃最新帧，需根据实际负载调整 `USART_RX_FIFO_DEPTH`。
+- 接收队列满时丢弃最新帧，发送队列满时丢弃当前帧，需根据实际负载调整 `USART_RX_FIFO_DEPTH` 或 `USART_TXBUFF_SIZE`；
+- ISR 负责入队和重启 DMA，回调任务负责解析、溢出告警和失败恢复。
 
 ## 20. 相关文件
 

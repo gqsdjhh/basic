@@ -2,7 +2,7 @@
 
 <p align='right'>neozng1@hnu.edu.cn</p>
 
-> 已实现发送环形缓冲区以解决短时间内连续调用`USARTSend()`发生丢帧的问题。IT/DMA模式不再直接调用HAL,而是将数据入队后由发送完成中断链式驱动发送(参考bsp_can的发送FIFO实现);BLOCKING模式不经过队列,直接阻塞发送。
+> 已实现发送环形缓冲区和接收帧环形队列：发送方向解决短时间内连续调用`USARTSend()`发生丢帧的问题，IT/DMA模式将数据入队后由发送完成中断链式驱动发送；接收方向由 ISR 把整帧写入 `rx_fifo` 并立即重启 DMA，模块回调在 `usart_rx` 任务中解析。BLOCKING 发送模式不经过队列，直接阻塞发送。
 
 ## 使用说明
 
@@ -24,9 +24,18 @@
 #define DEVICE_USART_CNT 3     // C板至多分配3个串口
 #define USART_RXBUFF_LIMIT 256 // 如果协议需要更大的buff,请修改这里
 #define USART_TXBUFF_SIZE 512  // 每个串口实例发送环形缓冲区的大小,若经常出现队列满的日志,请修改这里
+#define USART_RX_FIFO_DEPTH 4U // 接收帧环形队列槽位数,必须是2的幂且至少为2
+#define USART_RX_FIFO_MASK (USART_RX_FIFO_DEPTH - 1U)
 
 // 模块回调函数,用于解析协议
 typedef void (*usart_module_callback)();
+
+/* 接收帧,由DMA/IDLE事件产生 */
+typedef struct
+{
+    uint16_t length;
+    uint8_t data[USART_RXBUFF_LIMIT];
+} USART_RxFrame_t;
 
 /* 发送模式枚举 */
 typedef enum
@@ -117,32 +126,46 @@ static USARTInstance *usart_instance[DEVICE_USART_CNT];
 这是bsp层管理所有串口实例的入口。
 
 ```c
+static HAL_StatusTypeDef USARTStartReceive(USARTInstance *instance)
+static void USARTTryStartReceive(USARTInstance *instance)
+static uint8_t USART_RxFifoPush(USARTInstance *instance, const uint8_t *data, uint16_t length)
+static uint8_t USART_RxFifoPop(USARTInstance *instance, uint16_t *length)
+static void USARTDeferredRx(void *arg)
 static uint16_t USARTTxPending(const USARTInstance *_instance)
-static void USARTTxEnqueue(USARTInstance *_instance, const uint8_t *send_buf, uint16_t send_size)
+static uint8_t USARTTxEnqueue(USARTInstance *_instance, const uint8_t *send_buf, uint16_t send_size)
 static void USARTTxStart(USARTInstance *_instance)
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 ```
 
+- `USARTStartReceive()`启动一次 DMA/IDLE 接收，并在成功后关闭 DMA 半传输中断；失败时由 `USARTTryStartReceive()` 置位 `rx_restart_pending`，回调任务会在临界区内补启动。
+
+- `USART_RxFifoPush()`在 ISR 中把整帧从 `dma_recv_buff` 拷贝到帧环形队列；长度为 0、超过 `USART_RXBUFF_LIMIT` 或超过实例 `recv_buff_size` 时丢弃并增加 `rx_fifo_overflow`。队列满时丢弃最新帧，保留已入队帧顺序。
+
+- `USART_RxFifoPop()`在任务中取出整帧并拷贝到 `recv_buff`；长度非法时丢弃该槽并计数，不再截断后交给模块。
+
+- `USARTDeferredRx()`是帧队列的消费者：先处理 `rx_restart_pending`，再最多处理 `USART_RX_FIFO_DEPTH` 帧；若仍有剩余帧，会重新通知自己并 `osDelay(1)` 让出 CPU，避免高速串口饿死低优先级任务。
+
 - `USARTTxPending()`通过`tx_count`获取环形缓冲区中排队的数据量（不包含已交给HAL的在途数据）；独立计数避免了`tx_front == tx_back`时满/空无法区分的问题。
 
-- `USARTTxEnqueue()`是发送队列的入队函数，在临界区内操作：数据按回绕分两段拷贝至队尾；当队列空余空间不足时，`tx_front`前移丢弃最旧的数据（与bsp_can行为一致），因此**被丢弃的字节可能截断此前排队帧的头部**。入队数据为拷贝，调用者可以立即复用`send_buf`。由于在途数据存放在`tx_staging`中，丢弃操作永远不会破坏正在发送的帧。
+- `USARTTxEnqueue()`是发送队列的入队函数，在临界区内操作：数据按回绕分两段拷贝至队尾；当队列空余空间不足时，丢弃当前帧并增加 `tx_drop_count`，不会截断已排队帧。入队数据为拷贝，调用者可以立即复用`send_buf`。由于在途数据存放在`tx_staging`中，丢弃操作永远不会破坏正在发送的帧。
 
 - `USARTTxStart()`是出队发送函数：在临界区内将环形缓冲区中的数据按回绕分两段连续化拷贝到`tx_staging`（拷贝完成后环形区清空，数据所有权移交staging），并按最近一次记录的`tx_mode`调用`HAL_UART_Transmit_IT/DMA()`。若上一帧仍在途(`tx_in_flight`非0)或HAL未就绪则直接返回，数据留在队列中等待下一次触发。
 
-- `HAL_UARTEx_RxEventCallback()`在发生**IDLE中断**或**单次DMA传输中断**后会被调用（说明收到了完整的一包数据），随后在里面根据中断来源，调用拥有产生了该中断的模块的协议解析函数进行数据解包。
+- `HAL_UARTEx_RxEventCallback()`在发生**IDLE中断**或**单次DMA传输中断**后会被调用（说明收到了完整的一包数据）。它只负责把整帧写入 `rx_fifo`、重启接收并通知 `usart_rx` 任务，不在中断中解析协议。
 
-- `HAL_UART_ErrorCallback()`在串口传输出错的时候会被调用，重新开启接收；此外，若发送DMA出错，HAL会将`gState`置回READY并调用此回调，而TxCplt回调不会再触发，此时函数会复位`tx_in_flight`并继续驱动发送队列，防止发送永久停滞。
+- `HAL_UART_ErrorCallback()`在串口传输出错的时候会被调用，重新开启接收；若发送DMA出错，HAL会将`gState`置回READY并调用此回调，而TxCplt回调不会再触发，此时函数会复位`tx_in_flight`并继续驱动发送队列，防止发送永久停滞。
 
 - `HAL_UART_TxCpltCallback()`是发送完成中断回调，每当一个IT/DMA发送完成（`gState`已被HAL置回READY），就复位`tx_in_flight`并调用`USARTTxStart()`续发队列中的下一段数据，形成链式驱动。
 
-**并发保护**：入队发生在任务上下文，出队续发发生在发送完成中断上下文，存在竞态，因此队列操作使用BASEPRI关闭优先级5及以上的中断进行保护（与bsp_can相同，对外部中断实时性有轻微影响）。发送队列的临界区内包含最多`USART_TXBUFF_SIZE`字节的memcpy，请注意自定义缓冲区大小时不要设置得过大。
+**并发保护**：发送队列和接收队列的共享索引使用 `bsp_tools.h` 的 `BSP_CriticalEnter()/BSP_CriticalExit()` 保护，内部屏蔽 `configMAX_SYSCALL_INTERRUPT_PRIORITY` 及以上的中断。发送队列的临界区内包含最多`USART_TXBUFF_SIZE`字节的memcpy，请注意自定义缓冲区大小时不要设置得过大。
 
 ## 注意事项
 
-- 发送流程是非阻塞的：即使总线上没有接收方，发送队列也不会把任务卡死；但此时数据会不断累积，最终丢弃最旧的数据并打印`USART Send FIFO full`日志。
-- 队列满时的丢帧策略是丢弃最旧的字节，可能造成此前排队的帧内容不完整，若某module的发送频率超过串口吞吐，请控制发送频率或增大`USART_TXBUFF_SIZE`。
+- 发送流程是非阻塞的：即使总线上没有接收方，发送队列也不会把任务卡死；但此时数据会不断累积，最终丢弃当前帧并打印`USART Send FIFO full`日志。
+- 队列满时的丢帧策略是丢弃当前帧，已排队帧保持完整；若某module的发送频率超过串口吞吐，请控制发送频率或增大`USART_TXBUFF_SIZE`。
+- 接收队列满时丢弃最新帧，可通过 `rx_fifo_overflow` 和日志观察；帧长度非法（0 或超过 `recv_buff_size`）时也会被丢弃。
 - 单帧长度超过`USART_TXBUFF_SIZE`的发送请求会被直接拒绝并打印错误日志。
 - 同一实例混用BLOCKING与IT/DMA模式会导致发送时序错乱（gState检查会延迟队列发送并打印警告），请不要这样做。
 - 若同一实例的多个调用点使用不同的IT/DMA模式，队列续发时以最近一次调用的模式为准（last-call-wins）。

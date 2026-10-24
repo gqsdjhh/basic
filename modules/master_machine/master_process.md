@@ -1,133 +1,122 @@
 # master_process
 
-
-
 <p align='right'>neozng1@hnu.edu.cn</p>
 
-> TODO:
->
-> 1. 补全标志位解析和发送设置的代码
-> 2. 增加发送给视觉数据的时间戳用于数据对齐
+视觉/上位机通信模块。负责 seasky 协议的打包、解析，以及离线检测。通信物理层支持两种模式，由 `application/robot_def.h` 中的宏选择：
 
+- `VISION_USE_VCP`：USB CDC 虚拟串口（当前默认）
+- `VISION_USE_UART`：普通 USART + DMA/IDLE 接收
 
+## 数据结构
 
-## 总览和封装说明
-
-模块包含了和视觉通信的初始化、向上位机发送信息的接口和模块的串口的回调处理。接口的定义统一，可以方便的替换成其他通信方式，如CAN。
-
-## 代码结构
-
-.h文件内包括了外部接口和与**视觉上位机通信的数据结构定义**，以及模块对应的宏。c文件内为私有函数和外部接口的定义。
-
-本模块主要是对协议解析的处理和协议发送的封装，实际内容不多。协议相关内容都在`seasky_protocol.h`中。
-
-## 类型定义
-
-和视觉通信所必须的标志位和数据。包括开火模式，目标状态，目标类型，接收/发送数据结构体。
+`Vision_Recv_s` 保存解析后的目标状态和角度：
 
 ```c
-typedef enum
-{
-	NO_FIRE = 0,
-	AUTO_FIRE = 1,
-	AUTO_AIM = 2
-} Fire_Mode_e;
-
-typedef enum
-{
-	NO_TARGET = 0,
-	TARGET_CONVERGING = 1,
-	READY_TO_FIRE = 2
-} Target_State_e;
-
-typedef enum
-{
-	NO_TARGET_NUM = 0,
-	HERO1 = 1,
-	ENGINEER2 = 2,
-	INFANTRY3 = 3,
-	INFANTRY4 = 4,
-	INFANTRY5 = 5,
-	OUTPOST = 6,
-	SENTRY = 7,
-	BASE = 8
-} Target_Type_e;
-
 typedef struct
 {
-	Fire_Mode_e fire_mode;
-	Target_State_e target_state;
-	Target_Type_e target_type;
+    Fire_Mode_e fire_mode;
+    Target_State_e target_state;
+    Target_Type_e target_type;
 
-	float pitch;
-	float yaw;
+    float pitch;
+    float yaw;
 } Vision_Recv_s;
+```
 
-typedef enum
-{
-	BLUE = 0,
-	RED = 1
-} Enemy_Color_e;
+`Vision_Send_s` 保存回传给视觉的姿态和状态：
 
-typedef enum
-{
-	MODE_AIM = 0,
-	MODE_SMALL_BUFF = 1,
-	MODE_BIG_BUFF = 2
-} Work_Mode_e;
-
-typedef enum
-{
-	BIG_AMU_10 = 10,
-	SMALL_AMU_15 = 15,
-	BIG_AMU_16 = 16,
-	SMALL_AMU_18 = 18,
-	SMALL_AMU_30 = 30,
-} Bullet_Speed_e;
-
+```c
 typedef struct
 {
-	Enemy_Color_e enemy_color;
-	Work_Mode_e work_mode;
-	Bullet_Speed_e bullet_speed;
+    Enemy_Color_e enemy_color;
+    Work_Mode_e work_mode;
+    Bullet_Speed_e bullet_speed;
 
-	float yaw;
-	float pitch;
-	float roll;
+    float yaw;
+    float pitch;
+    float roll;
 } Vision_Send_s;
 ```
+
+枚举定义见 `modules/master_machine/master_process.h`。
 
 ## 外部接口
 
 ```c
 Vision_Recv_s *VisionInit(UART_HandleTypeDef *_handle);
 
-void VisionSend(Vision_Send_s *send);
+void VisionSend(void);
+
+void VisionSetFlag(Enemy_Color_e enemy_color,
+                   Work_Mode_e work_mode,
+                   Bullet_Speed_e bullet_speed);
+
+void VisionSetAltitude(float yaw, float pitch, float roll);
 ```
 
-给`VisionInit()`传入串口handle，将初始化一个视觉通信模块，返回值是接收数据的结构体指针。拥有视觉模块的应用应该在初始化中调用此函数，并保存返回值的指针。
+- `VisionInit()`：`VISION_USE_UART` 下使用传入的串口句柄注册 USART 实例；`VISION_USE_VCP` 下忽略该参数并初始化 USB。返回接收数据结构体指针。
+- `VisionSend()`：读取 `VisionSetAltitude()` 设置的姿态，通过 seasky 协议打包后发送。VCP 模式下写入 USB 发送环形队列；UART 模式下使用 USART DMA 发送。
+- `VisionSetFlag()` / `VisionSetAltitude()`：更新发送数据中的状态和姿态，由应用在发送前调用。
 
-调用`VisionSend`并传入填好发送数据的结构体，会通过底层的通信模块向视觉发送一帧报文。
+## UART 模式
 
-## 私有函数和变量
+`VisionInit(&huart1)` 会注册 USART 实例并注册 daemon。串口回调任务取出完整帧后调用 `DecodeVision()`：
 
 ```c
-static Vision_Recv_s recv_data;
-
-static usart_instance *vision_usart_instance;
-
-static void DecodeVision()
+static void DecodeVision(void)
 {
-    static uint16_t flag_register;
-    get_protocol_info(vision_usart_instance->recv_buff, &flag_register, (uint8_t*)&recv_data.pitch);
+    uint16_t flag_register;
+    DaemonReload(vision_daemon_instance);
+
+    (void)get_protocol_info(vision_usart_instance->recv_buff,
+                            vision_usart_instance->rx_len,
+                            &flag_register,
+                            (uint8_t *)&recv_data.pitch,
+                            sizeof(recv_data.pitch) * 2U);
     // TODO: code to resolve flag_register;
 }
 ```
 
-第一个是保存接收数据的结构体，其指针将会在初始化的时候返回给拥有者。目前最多只能配置一个视觉模块。
+`get_protocol_info()` 会校验帧头 CRC8、数据长度是否超过接收缓冲区、载荷是否超过目标缓冲区，以及整帧 CRC16；任一项失败都会丢弃该帧。
 
-第二个是该模块拥有的串口实例指针，用于调度其底层的发送和接收。如果要换成CAN/SPI等，替换成对应实例，并修改初始化和发送的实现即可。
+UART 模式的发送使用 `USARTSend(..., USART_TRANSFER_DMA)`。发送队列满时丢弃当前帧并打印日志，已排队帧不会被截断。
 
-`DecodeVision()`是解析视觉接收数据的回调函数，会在串口接收回调中被调用。如果修改通信协议，只需要更改
+## VCP 模式
 
-`get_protocol_info()`。
+VCP 是字节流，`DecodeVision(uint16_t available)` 每次从 USB 环形队列读取数据并追加到内部字节缓冲区，然后由 `VisionParseRxStream()` 自行拆帧：
+
+1. 查找帧头 `0xA5`；
+2. 校验帧头 CRC8；
+3. 读取 `data_length`，计算完整帧长并校验不超过 `VISION_RX_BUFF_SIZE` 和载荷上限；
+4. 等待完整帧；
+5. 调用 `get_protocol_info()` 校验 CRC16 并解析；
+6. 从缓冲区移除已处理帧。
+
+USB 接收溢出时 `USBDeferredRx()` 会清空接收队列并以 `rx_cbk(0)` 通知本模块复位解析状态，避免半帧继续参与解析。
+
+## 协议接口
+
+```c
+uint16_t get_protocol_info(uint8_t *rx_buf,
+                           uint16_t rx_len,
+                           uint16_t *flags_register,
+                           uint8_t *rx_data,
+                           uint16_t rx_data_size);
+
+void get_protocol_send_data(uint16_t send_id,
+                            uint16_t flags_register,
+                            float *tx_data,
+                            uint8_t float_length,
+                            uint8_t *tx_buf,
+                            uint16_t *tx_buf_len);
+```
+
+`get_protocol_info()` 增加了 `rx_len` 和 `rx_data_size` 参数，用于限制解析范围；UART 和 VCP 两条路径都必须传入实际有效长度。
+
+## 相关文件
+
+| 文件 | 作用 |
+|---|---|
+| `modules/master_machine/master_process.c` | 初始化、UART/VCP 收发、解析回调 |
+| `modules/master_machine/seasky_protocol.c` | seasky 协议打包/解包和 CRC 校验 |
+| `modules/master_machine/master_process.h` | 数据结构、枚举和外部接口 |

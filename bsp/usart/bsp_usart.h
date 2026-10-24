@@ -8,7 +8,7 @@
 #define DEVICE_USART_CNT 3     // C板至多分配3个串口
 #define USART_RXBUFF_LIMIT 256 // 如果协议需要更大的buff,请修改这里
 #define USART_TXBUFF_SIZE 512  // 每个串口实例发送环形缓冲区的大小,若经常出现队列满的日志,请修改这里
-#define USART_RX_FIFO_DEPTH 4U // 接收帧环形队列槽位数(可用容量为深度-1),必须是2的幂
+#define USART_RX_FIFO_DEPTH 4U // 接收帧环形队列槽位数(可用容量为深度-1),必须是2的幂且至少为2
 #define USART_RX_FIFO_MASK (USART_RX_FIFO_DEPTH - 1U)
 
 #if (USART_RX_FIFO_DEPTH < 2U) || ((USART_RX_FIFO_DEPTH & (USART_RX_FIFO_DEPTH - 1U)) != 0U)

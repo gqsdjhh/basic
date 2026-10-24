@@ -71,9 +71,9 @@ typedef struct{
 
 - `CAN_Init_Config_s`是用于初始化CAN实例的结构，在调用CAN实例的初始化函数时传入（下面介绍函数时详细介绍）。注意其成员中没有发送相关的配置，发送id依然通过`tx_id`指定。
 
-- `CAN_FIFO_Data_s`和`CAN_Send_FIFO_s`是发送队列相关的结构体，队列成员存放一帧待发送的数据包、数据长度以及发送方实例指针。**这两个结构体是bsp层的私有实现，module代码不需要关心，只在理解bsp_can.c内部逻辑时使用。**
+- `CAN_FIFO_Data_s`、`CAN_Send_FIFO_s` 和 `CAN_Rx_FIFO_s` 分别用于接收帧、发送队列和每总线接收队列。队列成员存放一帧原始数据、长度以及发送方实例指针。**这些结构体是bsp层的私有实现，module代码不需要关心，只在理解bsp_can.c内部逻辑时使用。**
 
-- `can_module_callback()`是模块提供给CAN接收中断回调函数使用的协议解析函数指针。对于每个需要CAN的模块，需要定义一个这样的函数用于解包数据。
+- `can_module_callback()`是模块提供给CAN接收回调任务使用的协议解析函数指针，运行在 `can1_rx`/`can2_rx` 任务上下文，而不是CAN中断中。对于每个需要CAN的模块，需要定义一个这样的函数用于解包数据。
 - 每个使用CAN外设的module，都需要在其内部定义一个`can_instance*`。
 
 
@@ -112,6 +112,10 @@ static CAN_Send_FIFO_s CAN1_Send_FIFO, CAN2_Send_FIFO; // CAN发送队列,每个
 ```c
 static void CANServiceInit()
 static void CANAddFilter(CANInstance *_instance)
+static void CANRxFIFOPut(CAN_Rx_FIFO_s *fifo, CANInstance *instance,
+                         const uint8_t *data, uint8_t length)
+static uint8_t CANRxFIFOPop(CAN_Rx_FIFO_s *fifo, CAN_FIFO_Data_s *frame)
+static void CANRxTask(void *arg)
 static void CANSendFIFOPut(CANInstance *_instance, CAN_Send_FIFO_s *CAN_Send_FIFO, uint8_t length)
 static void CANSendFIFOTransmit(CAN_Send_FIFO_s *CAN_Send_FIFO)
 static void CANFIFOxCallback(CAN_HandleTypeDef *_hcan, uint32_t fifox)
@@ -126,9 +130,11 @@ void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef *hcan)
 
 - `CANAddFilter()`在每次使用`CANRegister()`的时候被调用，用于给当前注册的实例添加过滤器规则并设定处理对应`rx_id`的接收FIFO。过滤器的作用是减小CAN收发器的压力，只接收符合过滤器规则的报文（否则不会产生接收中断）。注意FIFO的分配规则是各CAN内部按过滤器编号的奇偶分配：奇数编号的模块被分配到FIFO0，偶数编号的模块被分配到FIFO1（先前版本是按id奇偶分配，已修改）。
 
-- `CANSendFIFOPut()`和`CANSendFIFOTransmit()`是发送队列的入队和出队发送函数。二者都在临界区内操作队列：入队发生在任务上下文，出队发生在发送完成中断上下文，存在竞态，因此用BASEPRI关闭优先级5及以上的中断来保护（对外部中断实时性有轻微影响，后续可能改为无锁方案）。`CANSendFIFOTransmit()`会在邮箱满时直接返回，消息留在队列中等待下一次发送中断的触发。
+- `CANSendFIFOPut()`和`CANSendFIFOTransmit()`是发送队列的入队和出队发送函数。二者都在临界区内操作队列：入队发生在任务上下文，出队发生在发送完成中断上下文，存在竞态，因此使用 `bsp_tools.h` 的 `BSP_CriticalEnter()/BSP_CriticalExit()` 关闭 `configMAX_SYSCALL_INTERRUPT_PRIORITY` 及以上的中断来保护（对外部中断实时性有轻微影响，后续可能改为无锁方案）。`CANSendFIFOTransmit()`会在邮箱满时直接返回，消息留在队列中等待下一次发送中断的触发。
 
-- `HAL_CAN_RxFifo0MsgPendingCallback()`和`HAL_CAN_RxFifo1MsgPendingCallback()`都是对HAL的CAN回调函数的重定义（原本的callback是`__weak`修饰的弱定义），当发生FIFO0或FIFO1有新消息到达的时候，对应的callback会被调用。`CANFIFOxCallback()`随后被前两者调用，并根据接收id和硬件中断来源（哪一个CAN硬件，CAN1还是CAN2）调用对应的instance的回调函数进行协议解析。
+- `HAL_CAN_RxFifo0MsgPendingCallback()`和`HAL_CAN_RxFifo1MsgPendingCallback()`都是对HAL的CAN回调函数的重定义（原本的callback是`__weak`修饰的弱定义），当发生FIFO0或FIFO1有新消息到达的时候，对应的callback会被调用。`CANFIFOxCallback()`随后被前两者调用，并根据接收id和硬件中断来源（哪一个CAN硬件，CAN1还是CAN2）把原始帧写入对应总线的 `CAN_Rx_FIFO_s`，再通过 `CallbackTaskNotify()` 唤醒 `CANRxTask()`。
+
+- `CANRxTask()` 是每总线接收任务：从接收队列取出帧、拷贝到 `CANInstance.rx_buff`，再调用 `can_module_callback()` 进行协议解析。队列深度为 `CAN_RX_FIFO_SIZE`（32），队列满时丢弃最旧帧并记录 `drop_cnt`，任务中打印溢出警告。
 
 - `HAL_CAN_TxMailbox0/1/2CompleteCallback()`是发送完成的回调。每当一个邮箱发送完成被释放，就调用`CANSendFIFOTransmit()`将对应CAN硬件的队列中的下一条消息填入邮箱，形成上面的链式驱动。
 

@@ -21,3 +21,5 @@ GPIOInstance* test_example = GPIORegister(&gpio_init);
 GPIOSet(test_example);
 // GPIOxxx(test_exmaple, ...);
 ```
+
+`GPIORegister()` 在实例数超过 `GPIO_MX_DEVICE_NUM` 或内存分配失败时返回 `NULL`，调用方需要检查返回值。
