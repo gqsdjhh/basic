@@ -40,10 +40,20 @@ typedef enum
 /* 串口实例结构体,每个module都要包含一个实例 */
 typedef struct
 {
-    uint8_t recv_buff[USART_RXBUFF_LIMIT]; // 预先定义的最大buff大小,如果太小请修改USART_RXBUFF_LIMIT
-    uint8_t recv_buff_size;                // 模块接收一包数据的大小
-    UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
-    usart_module_callback module_callback; // 解析收到的数据的回调函数
+    uint8_t recv_buff[USART_RXBUFF_LIMIT];     // 任务解析用buffer,模块回调从此处读取完整帧
+    uint8_t dma_recv_buff[USART_RXBUFF_LIMIT]; // DMA直接写入的buffer
+    uint16_t recv_buff_size;                   // 模块接收一包数据的最大长度
+    UART_HandleTypeDef *usart_handle;          // 实例对应的usart_handle
+    usart_module_callback module_callback;     // 解析收到的数据的回调函数
+
+    CallbackTaskHandle_t rx_task; // 接收数据解析任务
+    volatile uint16_t rx_len;     // 当前任务的帧长度
+
+    USART_RxFrame_t rx_fifo[USART_RX_FIFO_DEPTH]; // 接收帧环形缓冲区
+    volatile uint16_t rx_fifo_head;               // 生产者(ISR)写入位置
+    volatile uint16_t rx_fifo_tail;               // 消费者(任务)读取位置
+    volatile uint32_t rx_fifo_overflow;           // 接收队列溢出丢帧计数
+    volatile uint8_t rx_restart_pending;          // ISR重启接收失败,等待任务补启动
 
     /* 发送环形缓冲区相关,IT/DMA模式下USARTSend会先将数据入队,由发送完成中断链式驱动发送 */
     uint8_t tx_buff[USART_TXBUFF_SIZE];    // 发送环形缓冲区(队列)
@@ -52,13 +62,14 @@ typedef struct
     volatile uint16_t tx_back;             // 环形缓冲区队尾,指向写入位置
     volatile uint16_t tx_count;            // 环形缓冲区中排队的字节数,用于区分满/空
     volatile uint16_t tx_in_flight;        // 已交给HAL但尚未发送完成的字节数,0表示空闲
+    volatile uint32_t tx_drop_count;       // 发送队列满导致的丢帧计数
     USART_TRANSFER_MODE tx_mode;           // 最近一次调用的发送模式,链式续发时使用
 } USARTInstance;
 
 /* usart 初始化配置结构体 */
 typedef struct
 {
-    uint8_t recv_buff_size;                // 模块接收一包数据的大小
+    uint16_t recv_buff_size;               // 模块接收一包数据的大小,不得超过USART_RXBUFF_LIMIT
     UART_HandleTypeDef *usart_handle;      // 实例对应的usart_handle
     usart_module_callback module_callback; // 解析收到的数据的回调函数
 } USART_Init_Config_s;
@@ -68,7 +79,9 @@ typedef struct
 
 - `USART_RXBUFF_LIMIT`是串口单次接收的数据长度上限，暂时设为256，如果需要更大的buffer容量，修改该值。
 
-- `USART_TXBUFF_SIZE`是每个串口实例发送环形缓冲区的大小（字节），队列满时会丢弃最旧的数据，若日志中频繁出现`USART Send FIFO full`，说明总线吞吐不足或缓冲区太小，需要修改该值。
+- `USART_TXBUFF_SIZE`是每个串口实例发送环形缓冲区的大小（字节），队列满时会丢弃当前帧、保留已排队帧，若日志中频繁出现`USART Send FIFO full`，说明总线吞吐不足或缓冲区太小，需要修改该值。
+
+- 接收方向使用 `USART_RX_FIFO_DEPTH` 个帧槽位，ISR 将整帧写入 `rx_fifo` 后立即重启 DMA，回调任务再从队列取出并解析，避免任务解析期间暂停接收。
 
 - `usart_module_callback()`是模块提供给串口接收中断回调函数使用的协议解析函数指针。对于每个需要串口的模块，需要定义一个这样的函数用于解包数据。
 
@@ -83,7 +96,7 @@ void USARTSend(USARTInstance *_instance, uint8_t *send_buf, uint16_t send_size, 
 uint8_t USARTIsReady(USARTInstance *_instance);
 ```
 
-`USARTRegister`是用于初始化串口对象的接口，调用时传入初始化配置结构体，注册成功后会自动开启DMA接收。`USARTServiceInit`用于手动重启某个实例的接收服务，一般用于lost callback的情况(使用串口的模块daemon)。
+`USARTRegister`是用于初始化串口对象的接口，调用时传入初始化配置结构体，注册成功后会自动开启DMA接收。`USARTServiceInit`用于手动重启某个实例的接收服务，一般用于lost callback的情况(使用串口的模块daemon)；当HAL返回`HAL_BUSY`且UART/DMA状态不一致时，会先中止再重新启动以恢复接收。
 
 `USARTSend()`是模块通过其拥有的串口对象发送数据的接口，调用时传入的参数为串口实例指针，发送缓存，此次要发送的数据长度（8-bit\*n)以及发送模式：
 
